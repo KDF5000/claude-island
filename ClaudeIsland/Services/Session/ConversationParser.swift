@@ -699,23 +699,6 @@ actor ConversationParser {
     }
 
     private func parseMessageLine(_ json: [String: Any], seenToolIds: inout Set<String>, toolIdToName: inout [String: String]) -> ChatMessage? {
-        // Try Coco format first (agent_start / message)
-        if let agentStart = json["agent_start"] as? [String: Any],
-           let input = agentStart["input"] as? [[String: Any]],
-           let firstUser = input.first(where: { ($0["role"] as? String) == "user" && ($0["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true }),
-           let content = firstUser["content"] as? String,
-           !content.hasPrefix("<system-reminder>") {
-            
-            let timestampStr = json["created_at"] as? String
-            let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
-            
-            return ChatMessage(
-                id: (json["id"] as? String) ?? UUID().uuidString,
-                role: .user,
-                timestamp: timestamp,
-                content: [.text(content)]
-            )
-        }
         
         if let messageOuter = json["message"] as? [String: Any],
            let messageDict = messageOuter["message"] as? [String: Any],
@@ -724,12 +707,21 @@ actor ConversationParser {
            (messageDict["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true,
            !content.hasPrefix("<system-reminder>") {
             
+            let msgId = (json["id"] as? String) ?? UUID().uuidString
+            // Prevent exact duplicates of user messages from inner messages
+            if roleStr == "user" && seenToolIds.contains("msg-\(msgId)") {
+                return nil
+            }
+            if roleStr == "user" {
+                seenToolIds.insert("msg-\(msgId)")
+            }
+            
             let timestampStr = json["created_at"] as? String
             let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
             let role: ChatRole = roleStr == "user" ? .user : .assistant
             
             return ChatMessage(
-                id: (json["id"] as? String) ?? UUID().uuidString,
+                id: msgId,
                 role: role,
                 timestamp: timestamp,
                 content: [.text(content)]
