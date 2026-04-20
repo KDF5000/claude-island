@@ -444,6 +444,16 @@ actor ConversationParser {
         )
     }
 
+    private static func extractText(from message: ChatMessage) -> String {
+        var text = ""
+        for block in message.content {
+            if case let .text(t) = block {
+                text += t
+            }
+        }
+        return text
+    }
+
     /// Parse only new lines since last read (incremental)
     private func parseNewLines(filePath: String, state: inout IncrementalParseState) -> [ChatMessage] {
         guard let fileHandle = FileHandle(forReadingAtPath: filePath) else {
@@ -594,6 +604,15 @@ actor ConversationParser {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                    let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, seenAssistantMessageIds: &state.seenAssistantMessageIds, toolIdToName: &state.toolIdToName) {
+                    
+                    if let last = state.messages.last, last.role == message.role {
+                        let lastText = Self.extractText(from: last)
+                        let currentText = Self.extractText(from: message)
+                        if !currentText.isEmpty && lastText == currentText {
+                            continue
+                        }
+                    }
+                    
                     newMessages.append(message)
                     state.messages.append(message)
                 }
@@ -601,6 +620,15 @@ actor ConversationParser {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
                     if let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, seenAssistantMessageIds: &state.seenAssistantMessageIds, toolIdToName: &state.toolIdToName) {
+                        
+                        if let last = state.messages.last, last.role == message.role {
+                            let lastText = Self.extractText(from: last)
+                            let currentText = Self.extractText(from: message)
+                            if !currentText.isEmpty && lastText == currentText {
+                                continue
+                            }
+                        }
+                        
                         Self.logger.info("[Parser] Parsed message id=\(message.id.prefix(8), privacy: .public) role=\(String(describing: message.role), privacy: .public) blocks=\(message.content.count)")
                         newMessages.append(message)
                         state.messages.append(message)
