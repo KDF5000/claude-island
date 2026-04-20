@@ -158,6 +158,7 @@ actor SessionStore {
         }
 
         session.pid = event.pid
+        session.providerId = event.providerId
         if let pid = event.pid {
             let tree = ProcessTreeBuilder.shared.buildTree()
             session.isInTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
@@ -228,7 +229,13 @@ actor SessionStore {
         // If this is a remote event with new JSONL lines, cache them locally so
         // ConversationParser can read them as if the session were local.
         if let lines = event.remoteJsonlLines, !lines.isEmpty {
+            Self.logger.info("[Remote] Hook event \(event.event, privacy: .public) has \(lines.count) JSONL lines for session \(sessionId.prefix(8), privacy: .public)")
             appendRemoteJsonlLines(lines, sessionId: sessionId, cwd: event.cwd)
+        } else {
+            Self.logger.info("[Remote] Hook event \(event.event, privacy: .public) for session \(sessionId.prefix(8), privacy: .public) has NO remote JSONL lines (remoteJsonlLines=\(event.remoteJsonlLines == nil ? "nil" : "empty", privacy: .public))")
+            if let debug = event.remotePathDebug, !debug.isEmpty {
+                Self.logger.info("[Remote] Path debug: \(debug.joined(separator: " | "), privacy: .public)")
+            }
         }
     }
 
@@ -1017,11 +1024,13 @@ actor SessionStore {
     // MARK: - History Loading
 
     private func loadHistoryFromFile(sessionId: String, cwd: String) async {
+        Self.logger.info("[History] loadHistoryFromFile: session \(sessionId.prefix(8), privacy: .public) cwd=\(cwd, privacy: .public)")
         // Parse file asynchronously
         let messages = await ConversationParser.shared.parseFullConversation(
             sessionId: sessionId,
             cwd: cwd
         )
+        Self.logger.info("[History] parseFullConversation returned \(messages.count) messages for session \(sessionId.prefix(8), privacy: .public)")
         let completedTools = await ConversationParser.shared.completedToolIds(for: sessionId)
         let toolResults = await ConversationParser.shared.toolResults(for: sessionId)
         let structuredResults = await ConversationParser.shared.structuredResults(for: sessionId)
@@ -1051,7 +1060,12 @@ actor SessionStore {
         structuredResults: [String: ToolResultData],
         conversationInfo: ConversationInfo
     ) async {
-        guard var session = sessions[sessionId] else { return }
+        guard var session = sessions[sessionId] else {
+            Self.logger.warning("[History] processHistoryLoaded: session \(sessionId.prefix(8), privacy: .public) NOT in sessions dict, dropping \(messages.count) messages")
+            return
+        }
+
+        Self.logger.info("[History] processHistoryLoaded: session \(sessionId.prefix(8), privacy: .public) messages=\(messages.count) existingChatItems=\(session.chatItems.count)")
 
         // Update conversationInfo (summary, lastMessage, etc.)
         session.conversationInfo = conversationInfo
@@ -1081,6 +1095,7 @@ actor SessionStore {
         // Sort by timestamp
         session.chatItems.sort { $0.timestamp < $1.timestamp }
 
+        Self.logger.info("[History] processHistoryLoaded: done, chatItems now \(session.chatItems.count) for session \(sessionId.prefix(8), privacy: .public)")
         sessions[sessionId] = session
     }
 
@@ -1101,11 +1116,14 @@ actor SessionStore {
                 cwd: cwd
             )
 
+            Self.logger.info("[Sync] parseIncremental for \(sessionId.prefix(8), privacy: .public): newMessages=\(result.newMessages.count) clearDetected=\(result.clearDetected)")
+
             if result.clearDetected {
                 await self?.process(.clearDetected(sessionId: sessionId))
             }
 
             guard !result.newMessages.isEmpty || result.clearDetected else {
+                Self.logger.info("[Sync] No new messages for \(sessionId.prefix(8), privacy: .public), skipping fileUpdated")
                 return
             }
 
@@ -1240,6 +1258,9 @@ actor SessionStore {
         let dir = ClaudePaths.projectsDir.appendingPathComponent(projectDir)
         let filePath = dir.appendingPathComponent("\(sessionId).jsonl")
 
+        Self.logger.info("[Remote] Appending \(lines.count) JSONL lines for session \(sessionId.prefix(8), privacy: .public) cwd=\(cwd, privacy: .public)")
+        Self.logger.info("[Remote] Cache file path: \(filePath.path, privacy: .public)")
+
         let fm = FileManager.default
         do {
             try fm.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -1253,6 +1274,7 @@ actor SessionStore {
             } else {
                 try data.write(to: filePath, options: .atomic)
             }
+            Self.logger.info("[Remote] Successfully wrote \(data.count) bytes to cache file")
         } catch {
             Self.logger.error("Failed to cache remote JSONL: \(error.localizedDescription, privacy: .public)")
             return

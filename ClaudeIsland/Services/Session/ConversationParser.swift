@@ -387,6 +387,7 @@ actor ConversationParser {
         let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
 
         guard FileManager.default.fileExists(atPath: sessionFile) else {
+            Self.logger.warning("[Parser] parseFullConversation: file NOT found: \(sessionFile, privacy: .public)")
             return []
         }
 
@@ -412,6 +413,7 @@ actor ConversationParser {
         let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
 
         guard FileManager.default.fileExists(atPath: sessionFile) else {
+            Self.logger.warning("[Parser] parseIncremental: file NOT found: \(sessionFile, privacy: .public)")
             return IncrementalParseResult(
                 newMessages: [],
                 allMessages: [],
@@ -443,6 +445,7 @@ actor ConversationParser {
     /// Parse only new lines since last read (incremental)
     private func parseNewLines(filePath: String, state: inout IncrementalParseState) -> [ChatMessage] {
         guard let fileHandle = FileHandle(forReadingAtPath: filePath) else {
+            Self.logger.warning("[Parser] Cannot open file: \(filePath, privacy: .public)")
             return []
         }
         defer { try? fileHandle.close() }
@@ -454,12 +457,17 @@ actor ConversationParser {
             return []
         }
 
+        let offsetCopy = state.lastFileOffset
+        Self.logger.info("[Parser] File=\(filePath, privacy: .public) size=\(fileSize) offset=\(offsetCopy)")
+
         if fileSize < state.lastFileOffset {
+            Self.logger.info("[Parser] File shrank, resetting state")
             state = IncrementalParseState()
         }
 
         if fileSize == state.lastFileOffset {
-            return state.messages
+            Self.logger.info("[Parser] No new bytes, returning empty")
+            return []
         }
 
         do {
@@ -588,14 +596,23 @@ actor ConversationParser {
                 }
             } else if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") || line.contains("\"agent_start\"") || line.contains("\"message\"") || line.contains("\"agent_end\"") {
                 if let lineData = line.data(using: .utf8),
-                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                   let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, toolIdToName: &state.toolIdToName) {
-                    newMessages.append(message)
-                    state.messages.append(message)
+                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
+                    if let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, toolIdToName: &state.toolIdToName) {
+                        Self.logger.info("[Parser] Parsed message id=\(message.id.prefix(8), privacy: .public) role=\(String(describing: message.role), privacy: .public) blocks=\(message.content.count)")
+                        newMessages.append(message)
+                        state.messages.append(message)
+                    } else {
+                        let keys = Array((json.keys.prefix(5)))
+                        Self.logger.info("[Parser] parseMessageLine returned nil for line with keys: \(keys, privacy: .public)")
+                    }
+                } else {
+                    Self.logger.warning("[Parser] JSON parse failed for candidate line prefix: \(String(line.prefix(80)), privacy: .public)")
                 }
             }
         }
 
+        let totalMessages = state.messages.count
+        Self.logger.info("[Parser] Done: newMessages=\(newMessages.count) totalMessages=\(totalMessages)")
         state.lastFileOffset = fileSize
         return newMessages
     }
@@ -633,15 +650,29 @@ actor ConversationParser {
 
     /// Path to the JSONL file
     private static func sessionFilePath(sessionId: String, cwd: String) -> String {
+        // First check our fallback/remote cache
+        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+        let claudePath = ClaudePaths.projectsDir.path + "/" + projectDir + "/" + sessionId + ".jsonl"
+        
         // Local Coco (Trae CLI) sessions: events.jsonl has conversation messages.
         // traces.jsonl is OpenTelemetry spans only and cannot be parsed for messages.
         let cocoPath = NSHomeDirectory() + "/Library/Caches/coco/sessions/\(sessionId)/events.jsonl"
+        
+        // If it exists in Claude Island cache, use that (e.g. remote sessions)
+        if FileManager.default.fileExists(atPath: claudePath) {
+            logger.info("[Parser] sessionFilePath: using claude path for \(sessionId.prefix(8), privacy: .public): \(claudePath, privacy: .public)")
+            return claudePath
+        }
+        
+        // Otherwise, fall back to Coco local path
         if FileManager.default.fileExists(atPath: cocoPath) {
+            logger.info("[Parser] sessionFilePath: using coco path for \(sessionId.prefix(8), privacy: .public)")
             return cocoPath
         }
 
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        return ClaudePaths.projectsDir.path + "/" + projectDir + "/" + sessionId + ".jsonl"
+        // Return claudePath as default if neither exists
+        logger.info("[Parser] sessionFilePath: returning default claude path for \(sessionId.prefix(8), privacy: .public): \(claudePath, privacy: .public)")
+        return claudePath
     }
 
     /// Build subagent JSONL file path.

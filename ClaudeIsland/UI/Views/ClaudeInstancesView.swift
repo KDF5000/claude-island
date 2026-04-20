@@ -28,7 +28,7 @@ struct ClaudeInstancesView: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundColor(.white.opacity(0.4))
 
-            Text("Run claude in terminal")
+            Text("Run claude or coco in terminal")
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.25))
         }
@@ -176,6 +176,11 @@ struct InstanceRow: View {
                         .font(.system(size: 13, weight: .medium))
                         .foregroundColor(.white)
                         .lineLimit(1)
+
+                    // Provider badge (show for non-Claude providers)
+                    if session.providerId != "claude-code" {
+                        ProviderBadge(providerId: session.providerId, displayName: session.providerDisplayName)
+                    }
 
                     // Token usage indicator
                     if session.usage.totalTokens > 0 {
@@ -499,5 +504,33 @@ struct TerminalButton: View {
             .clipShape(Capsule())
         }
         .buttonStyle(.plain)
+    }
+}
+
+// MARK: - Provider Badge
+
+/// Small badge showing the provider name for non-Claude sessions
+struct ProviderBadge: View {
+    let providerId: String
+    let displayName: String
+
+    /// Badge color based on provider
+    private var badgeColor: Color {
+        switch providerId {
+        case "coco", "coco-remote":
+            return Color(red: 0.4, green: 0.6, blue: 0.9)  // Blue for Coco
+        default:
+            return Color.white.opacity(0.3)
+        }
+    }
+
+    var body: some View {
+        Text(displayName)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundColor(badgeColor)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(badgeColor.opacity(0.15))
+            .clipShape(Capsule())
     }
 }

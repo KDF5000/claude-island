@@ -134,10 +134,11 @@ def main():
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
     
-    # Determine provider based on event name format
-    # Claude Code uses CamelCase: PreToolUse, PostToolUse
-    # Coco uses snake_case: pre_tool_use, post_tool_use
-    if event and event[0].isupper():
+    # Determine provider
+    # Claude Code provides transcript_path in hook events.
+    # Coco does not, so if it's empty, we assume it's Coco.
+    transcript_path = data.get("transcript_path", "")
+    if transcript_path:
         provider_id = "claude-code"
     else:
         provider_id = "coco"
@@ -151,10 +152,11 @@ def main():
     # Coco does not, so we derive the path from the well-known cache location.
     # Note: traces.jsonl contains OpenTelemetry spans (not messages); events.jsonl
     # has the actual conversation in agent_start/message/tool_call format.
-    transcript_path = data.get("transcript_path", "")
+    _path_debug = []
     if not transcript_path and provider_id == "coco":
         import platform
         home = os.path.expanduser("~")
+        _path_debug.append(f"home={home} platform={platform.system()}")
         if platform.system() == "Darwin":
             coco_cache_base = os.path.join(home, "Library", "Caches", "coco", "sessions", session_id)
         else:
@@ -163,8 +165,20 @@ def main():
             coco_cache_base = os.path.join(xdg_cache, "coco", "sessions", session_id)
         # events.jsonl has conversation messages; traces.jsonl is OpenTelemetry spans only
         coco_events = os.path.join(coco_cache_base, "events.jsonl")
+        _path_debug.append(f"coco_events={coco_events} exists={os.path.isfile(coco_events)}")
         if os.path.isfile(coco_events):
             transcript_path = coco_events
+        else:
+            # Also try ~/.config/coco and other common locations
+            for alt_base in [
+                os.path.join(home, ".config", "coco", "sessions", session_id),
+                os.path.join(home, ".local", "share", "coco", "sessions", session_id),
+            ]:
+                alt_events = os.path.join(alt_base, "events.jsonl")
+                _path_debug.append(f"alt={alt_events} exists={os.path.isfile(alt_events)}")
+                if os.path.isfile(alt_events):
+                    transcript_path = alt_events
+                    break
 
     # Build state object
     state = {
@@ -177,6 +191,7 @@ def main():
         "tool": tool_name,
         "tool_input": tool_input,
         "transcript_path": transcript_path,
+        "remote_path_debug": _path_debug,
     }
 
     # === Event-to-status mapping ===

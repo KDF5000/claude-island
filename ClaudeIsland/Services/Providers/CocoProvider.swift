@@ -36,7 +36,7 @@ struct CocoProviderFactory: AgentProviderFactory {
 class CocoProvider: AgentProvider {
     let providerId = "coco"
     let displayName = "Coco"
-    var icon: NSImage? { NSImage(named: "coco-icon") }
+    var icon: NSImage? { NSImage(named: "coco-icon") ?? NSImage(named: "TraeIcon") ?? NSImage(systemSymbolName: "terminal", accessibilityDescription: nil) }
 
     var capabilities: ProviderCapabilities {
         [.realTimeEvents, .permissionControl, .chatHistory, .transcriptAccess]
@@ -56,7 +56,7 @@ class CocoProvider: AgentProvider {
     var sessionsPublisher: AnyPublisher<[SessionState], Never> {
         SessionStore.shared.sessionsPublisher
             .map { sessions in
-                sessions.filter { $0.providerId == "coco" }
+                sessions.filter { $0.providerId == "coco" || $0.providerId == "coco-remote" }
             }
             .eraseToAnyPublisher()
     }

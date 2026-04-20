@@ -39,6 +39,11 @@ enum AppSettings {
     private enum Keys {
         static let notificationSound = "notificationSound"
         static let claudeDirectoryName = "claudeDirectoryName"
+
+        static let remoteSSHEnabled = "remoteSSHEnabled"
+        static let remoteSSHHost = "remoteSSHHost"
+        static let remoteSSHUser = "remoteSSHUser"
+        static let remoteSSHPort = "remoteSSHPort"
     }
 
     // MARK: - Notification Sound
@@ -69,6 +74,38 @@ enum AppSettings {
         }
         set {
             defaults.set(newValue.trimmingCharacters(in: .whitespaces), forKey: Keys.claudeDirectoryName)
+        }
+    }
+
+    // MARK: - Remote SSH
+
+    /// Whether Claude Island should maintain an SSH reverse tunnel to a remote host.
+    static var remoteSSHEnabled: Bool {
+        get { defaults.bool(forKey: Keys.remoteSSHEnabled) }
+        set { defaults.set(newValue, forKey: Keys.remoteSSHEnabled) }
+    }
+
+    /// Remote host (e.g. "example.com" or "10.0.0.12"). Empty means not configured.
+    static var remoteSSHHost: String {
+        get { (defaults.string(forKey: Keys.remoteSSHHost) ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+        set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Keys.remoteSSHHost) }
+    }
+
+    /// Remote SSH user (optional). Empty means use default SSH user.
+    static var remoteSSHUser: String {
+        get { (defaults.string(forKey: Keys.remoteSSHUser) ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+        set { defaults.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Keys.remoteSSHUser) }
+    }
+
+    /// Remote SSH port (default 22).
+    static var remoteSSHPort: Int {
+        get {
+            let value = defaults.integer(forKey: Keys.remoteSSHPort)
+            return value == 0 ? 22 : value
+        }
+        set {
+            let clamped = max(1, min(65535, newValue))
+            defaults.set(clamped, forKey: Keys.remoteSSHPort)
         }
     }
 }

@@ -129,8 +129,10 @@ struct ToolCompletionResult: Sendable {
 extension HookEvent {
     /// Determine the target session phase based on this hook event
     nonisolated func determinePhase() -> SessionPhase {
+        let normalizedEvent = event.lowercased().replacingOccurrences(of: "_", with: "")
+        
         // PreCompact takes priority
-        if event == "PreCompact" {
+        if normalizedEvent == "precompact" {
             return .compacting
         }
 
@@ -144,7 +146,7 @@ extension HookEvent {
             ))
         }
 
-        if event == "Notification" && notificationType == "idle_prompt" {
+        if normalizedEvent == "notification" && notificationType == "idle_prompt" {
             return .idle
         }
 
@@ -164,13 +166,15 @@ extension HookEvent {
 
     /// Whether this is a tool-related event
     nonisolated var isToolEvent: Bool {
-        event == "PreToolUse" || event == "PostToolUse" || event == "PermissionRequest"
+        let normalizedEvent = event.lowercased().replacingOccurrences(of: "_", with: "")
+        return normalizedEvent == "pretooluse" || normalizedEvent == "posttooluse" || normalizedEvent == "permissionrequest"
     }
 
     /// Whether this event should trigger a file sync
     nonisolated var shouldSyncFile: Bool {
-        switch event {
-        case "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop":
+        let normalizedEvent = event.lowercased().replacingOccurrences(of: "_", with: "")
+        switch normalizedEvent {
+        case "userpromptsubmit", "pretooluse", "posttooluse", "stop":
             return true
         default:
             return false

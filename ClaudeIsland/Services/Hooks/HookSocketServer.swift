@@ -36,6 +36,9 @@ struct HookEvent: Codable, Sendable {
     /// Only present for remote (TCP) events when new lines have been written since the last event.
     let remoteJsonlLines: [String]?
 
+    /// Path resolution debug info from the remote hook script (for diagnosing missing JSONL).
+    let remotePathDebug: [String]?
+
     enum CodingKeys: String, CodingKey {
         case providerId = "provider_id"
         case sessionId = "session_id"
@@ -48,6 +51,7 @@ struct HookEvent: Codable, Sendable {
         case agentId = "agent_id"
         case agentType = "agent_type"
         case remoteJsonlLines = "remote_jsonl_lines"
+        case remotePathDebug = "remote_path_debug"
     }
 
     /// Create a copy with updated toolUseId
@@ -67,7 +71,8 @@ struct HookEvent: Codable, Sendable {
         transcriptPath: String? = nil,
         agentId: String? = nil,
         agentType: String? = nil,
-        remoteJsonlLines: [String]? = nil
+        remoteJsonlLines: [String]? = nil,
+        remotePathDebug: [String]? = nil
     ) {
         self.providerId = providerId
         self.sessionId = sessionId
@@ -85,6 +90,7 @@ struct HookEvent: Codable, Sendable {
         self.agentId = agentId
         self.agentType = agentType
         self.remoteJsonlLines = remoteJsonlLines
+        self.remotePathDebug = remotePathDebug
     }
 
     var sessionPhase: SessionPhase {
@@ -509,7 +515,7 @@ class HookSocketServer {
         var pollFd = pollfd(fd: clientSocket, events: Int16(POLLIN), revents: 0)
 
         let startTime = Date()
-        while Date().timeIntervalSince(startTime) < 0.5 {
+        while Date().timeIntervalSince(startTime) < 5.0 {
             let pollResult = poll(&pollFd, 1, 50)
 
             if pollResult > 0 && (pollFd.revents & Int16(POLLIN)) != 0 {
@@ -518,17 +524,15 @@ class HookSocketServer {
                 if bytesRead > 0 {
                     allData.append(contentsOf: buffer[0..<bytesRead])
                 } else if bytesRead == 0 {
+                    // EOF — sender closed connection, all data received
                     break
                 } else if errno != EAGAIN && errno != EWOULDBLOCK {
                     break
                 }
-            } else if pollResult == 0 {
-                if !allData.isEmpty {
-                    break
-                }
-            } else {
+            } else if pollResult < 0 {
                 break
             }
+            // pollResult == 0 means poll timed out with no data yet — keep waiting
         }
 
         guard !allData.isEmpty else {
@@ -563,7 +567,8 @@ class HookSocketServer {
                 transcriptPath: decoded.transcriptPath,
                 agentId: decoded.agentId,
                 agentType: decoded.agentType,
-                remoteJsonlLines: decoded.remoteJsonlLines
+                remoteJsonlLines: decoded.remoteJsonlLines,
+                remotePathDebug: decoded.remotePathDebug
             )
         }()
 
@@ -610,7 +615,9 @@ class HookSocketServer {
                 message: event.message,
                 transcriptPath: event.transcriptPath,
                 agentId: event.agentId,
-                agentType: event.agentType
+                agentType: event.agentType,
+                remoteJsonlLines: event.remoteJsonlLines,
+                remotePathDebug: event.remotePathDebug
             )
 
             let pending = PendingPermission(

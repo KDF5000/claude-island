@@ -14,8 +14,9 @@ struct SessionState: Equatable, Identifiable, Sendable {
     // MARK: - Identity
 
     let sessionId: String
-    let cwd: String
-    let projectName: String
+    var cwd: String
+    var projectName: String
+    var providerId: String  // "claude-code" or "coco"
 
     // MARK: - Instance Metadata
 
@@ -68,6 +69,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         sessionId: String,
         cwd: String,
         projectName: String? = nil,
+        providerId: String = "claude-code",
         pid: Int? = nil,
         tty: String? = nil,
         isInTmux: Bool = false,
@@ -86,6 +88,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         self.sessionId = sessionId
         self.cwd = cwd
         self.projectName = projectName ?? URL(fileURLWithPath: cwd).lastPathComponent
+        self.providerId = providerId
         self.pid = pid
         self.tty = tty
         self.isInTmux = isInTmux
@@ -122,6 +125,18 @@ struct SessionState: Equatable, Identifiable, Sendable {
             return "\(pid)-\(sessionId)"
         }
         return sessionId
+    }
+
+    /// Display name for the provider
+    var providerDisplayName: String {
+        switch providerId {
+        case "coco", "coco-remote":
+            return "Coco"
+        case "claude-code":
+            return "Claude Code"
+        default:
+            return providerId
+        }
     }
 
     /// Display title: summary > first user message > project name

@@ -35,9 +35,14 @@ struct ChatView: View {
 
         // Initialize from cache if available (prevents loading flicker on view recreation)
         let cachedHistory = ChatHistoryManager.shared.history(for: sessionId)
-        let alreadyLoaded = !cachedHistory.isEmpty
+        // Use isLoaded (JSONL parsed) rather than !cachedHistory.isEmpty (which includes
+        // hook-injected tool placeholders) to decide whether loadFromFile can be skipped.
+        // This ensures sessions with only hook-based tool entries still load their full
+        // conversation history from JSONL on first open.
+        let alreadyLoaded = ChatHistoryManager.shared.isLoaded(sessionId: sessionId)
         self._history = State(initialValue: cachedHistory)
-        self._isLoading = State(initialValue: !alreadyLoaded)
+        // Show loading spinner only if we haven't loaded from JSONL yet AND have no cached content
+        self._isLoading = State(initialValue: !alreadyLoaded && cachedHistory.isEmpty)
         self._hasLoadedOnce = State(initialValue: alreadyLoaded)
     }
 
@@ -307,19 +312,17 @@ struct ChatView: View {
                 .animation(.spring(response: 0.3, dampingFraction: 0.8), value: history.count)
             }
             .scaleEffect(x: 1, y: -1)
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-                // Check if we're near the top of the content (which is bottom in inverted view)
-                // contentOffset.y near 0 means at bottom, larger means scrolled up
-                geometry.contentOffset.y < 50
-            } action: { wasAtBottom, isNowAtBottom in
-                if wasAtBottom && !isNowAtBottom {
-                    // User scrolled away from bottom
-                    pauseAutoscroll()
-                } else if !wasAtBottom && isNowAtBottom && isAutoscrollPaused {
-                    // User scrolled back to bottom
-                    resumeAutoscroll()
+            .modifier(ScrollGeometryModifier(
+                onScrollChange: { wasAtBottom, isNowAtBottom in
+                    if wasAtBottom && !isNowAtBottom {
+                        // User scrolled away from bottom
+                        pauseAutoscroll()
+                    } else if !wasAtBottom && isNowAtBottom && isAutoscrollPaused {
+                        // User scrolled back to bottom
+                        resumeAutoscroll()
+                    }
                 }
-            }
+            ))
             .onChange(of: shouldScrollToBottom) { _, shouldScroll in
                 if shouldScroll {
                     withAnimation(.easeOut(duration: 0.3)) {
@@ -1225,6 +1228,27 @@ struct NewMessagesIndicator: View {
             withAnimation(.spring(response: 0.2, dampingFraction: 0.7)) {
                 isHovering = hovering
             }
+        }
+    }
+}
+
+// MARK: - Scroll Geometry Modifier (macOS 15+ compatibility)
+
+/// A ViewModifier that wraps onScrollGeometryChange for macOS 15+ compatibility
+struct ScrollGeometryModifier: ViewModifier {
+    let onScrollChange: (Bool, Bool) -> Void
+    
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content
+                .onScrollGeometryChange(for: Bool.self) { geometry in
+                    geometry.contentOffset.y < 50
+                } action: { wasAtBottom, isNowAtBottom in
+                    onScrollChange(wasAtBottom, isNowAtBottom)
+                }
+        } else {
+            // Fallback for macOS 14 and earlier - no scroll tracking
+            content
         }
     }
 }
