@@ -320,6 +320,7 @@ struct NotchView: View {
             Button {
                 AppDelegate.shared?.showSettingsWindow()
                 updateManager.markUpdateSeen()
+                viewModel.notchClose()
             } label: {
                 ZStack(alignment: .topTrailing) {
                     Image(systemName: "gearshape")
