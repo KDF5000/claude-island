@@ -78,45 +78,114 @@ def get_tty():
     return None
 
 
-def send_event(state):
+def _try_get_mtime(path):
+    if not path:
+        return None
+    try:
+        return os.path.getmtime(path)
+    except Exception:
+        return None
+
+def send_event(state, wait_for_response=False, transcript_path=None):
     """Send event to app via SSH tunnel, return response if any"""
     
+    sock = None
     # Try Unix socket first (if forwarded via SSH -R)
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(TIMEOUT_SECONDS)
+        sock.settimeout(2)
         sock.connect(SOCKET_PATH)
         sock.sendall(json.dumps(state).encode())
-
-        if state.get("status") == "waiting_for_approval":
-            response = sock.recv(4096)
-            sock.close()
-            if response:
+        
+        if not wait_for_response:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return None
+            
+        start_mtime = _try_get_mtime(transcript_path)
+        deadline = time.time() + TIMEOUT_SECONDS
+        
+        while time.time() < deadline:
+            # For Coco, any transcript change means the user interacted with the terminal
+            # so we should stop waiting and let the terminal take over
+            current_mtime = _try_get_mtime(transcript_path)
+            if start_mtime is not None and current_mtime is not None and current_mtime > start_mtime:
+                # The user likely answered the prompt in the terminal
+                return {"decision": "ask"}
+                
+            try:
+                sock.settimeout(0.25)
+                response = sock.recv(4096)
+                if not response:
+                    break
                 return json.loads(response.decode())
-        else:
-            sock.close()
+            except socket.timeout:
+                continue
+            except json.JSONDecodeError:
+                break
+            except Exception:
+                break
+                
         return None
     except (socket.error, OSError, FileNotFoundError):
+        if sock:
+            try:
+                sock.close()
+            except Exception:
+                pass
+        sock = None
         pass
 
     # Fall back to TCP (if forwarded via SSH -R port:port)
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(TIMEOUT_SECONDS)
+        sock.settimeout(2)
         sock.connect((TCP_HOST, TCP_PORT))
         sock.sendall(json.dumps(state).encode())
 
-        if state.get("status") == "waiting_for_approval":
-            response = sock.recv(4096)
-            sock.close()
-            if response:
+        if not wait_for_response:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return None
+            
+        start_mtime = _try_get_mtime(transcript_path)
+        deadline = time.time() + TIMEOUT_SECONDS
+        
+        while time.time() < deadline:
+            # For Coco, any transcript change means the user interacted with the terminal
+            # so we should stop waiting and let the terminal take over
+            current_mtime = _try_get_mtime(transcript_path)
+            if start_mtime is not None and current_mtime is not None and current_mtime > start_mtime:
+                # The user likely answered the prompt in the terminal
+                return {"decision": "ask"}
+                
+            try:
+                sock.settimeout(0.25)
+                response = sock.recv(4096)
+                if not response:
+                    break
                 return json.loads(response.decode())
-        else:
-            sock.close()
+            except socket.timeout:
+                continue
+            except json.JSONDecodeError:
+                break
+            except Exception:
+                break
+                
         return None
     except (socket.error, OSError, json.JSONDecodeError) as e:
         print(f"ClaudeIsland remote hook error: {e}", file=sys.stderr)
         return None
+    finally:
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
 
 
 def main():
@@ -133,6 +202,16 @@ def main():
     cwd = data.get("cwd") or os.getcwd()
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
+    
+    # Check if this is a Coco agent_end or other top-level message that might not have a proper hook event name
+    if not event:
+        if "agent_end" in data:
+            event = "agent_end"
+        elif "message" in data and isinstance(data["message"], dict):
+            event = "userpromptsubmit" # Default fallback for messages that don't specify an event
+            
+    # Try to extract the actual tool_call_id from Coco payloads
+    actual_tool_use_id = data.get("tool_call_id") or data.get("tool_use_id")
     
     # Determine provider
     # Claude Code provides transcript_path in hook events.
@@ -205,19 +284,19 @@ def main():
         
     elif normalized_event == "pretooluse":
         state["status"] = "running_tool"
-        state["tool_use_id"] = data.get("tool_use_id") or f"{session_id}:{tool_name}"
+        state["tool_use_id"] = actual_tool_use_id or f"{session_id}:{tool_name}"
         
     elif normalized_event == "posttooluse":
         state["status"] = "processing"
         tool_response = data.get("tool_response", "")
         state["tool_result"] = tool_response[:500] if tool_response else None
-        state["tool_use_id"] = data.get("tool_use_id") or f"{session_id}:{tool_name}"
+        state["tool_use_id"] = actual_tool_use_id or f"{session_id}:{tool_name}"
         
     elif normalized_event == "posttoolusefailure":
         error = data.get("error", "Unknown error")
         state["status"] = "processing"
         state["error"] = error
-        state["tool_use_id"] = data.get("tool_use_id") or f"{session_id}:{tool_name}"
+        state["tool_use_id"] = actual_tool_use_id or f"{session_id}:{tool_name}"
         
     elif normalized_event == "notification":
         notification_type = data.get("notification_type", "")
@@ -259,6 +338,10 @@ def main():
         state["status"] = "ended"
         state["end_reason"] = reason
         
+    elif normalized_event == "agent_end" or normalized_event == "agentend":
+        state["status"] = "waiting_for_input"
+        state["event"] = "agent_end"  # Ensure event is explicitly set so it determines the phase
+        
     elif normalized_event == "precompact":
         state["status"] = "compacting"
         
@@ -270,10 +353,10 @@ def main():
     elif normalized_event == "permissionrequest":
         # === Critical: Permission request handling ===
         state["status"] = "waiting_for_approval"
-        state["tool_use_id"] = data.get("tool_use_id") or f"{session_id}:{tool_name}"
+        state["tool_use_id"] = actual_tool_use_id or f"{session_id}:{tool_name}"
         
         # Send to app and wait for decision
-        response = send_event(state)
+        response = send_event(state, wait_for_response=True, transcript_path=transcript_path)
         
         if response:
             decision = response.get("decision", "ask")
@@ -282,6 +365,7 @@ def main():
             if decision == "allow":
                 output = {
                     "hookSpecificOutput": {
+                        "hookEventName": event,
                         "decision": {"behavior": "allow"}
                     }
                 }
@@ -291,6 +375,7 @@ def main():
             elif decision == "deny":
                 output = {
                     "hookSpecificOutput": {
+                        "hookEventName": event,
                         "decision": {
                             "behavior": "deny",
                             "message": reason or "Denied by user via ClaudeIsland"
@@ -300,7 +385,8 @@ def main():
                 print(json.dumps(output))
                 sys.exit(0)
         
-        # No response or "ask" - let the CLI show its normal UI
+        # We MUST print empty output so Coco doesn't block waiting for hook output
+        print("{}")
         sys.exit(0)
         
     else:
@@ -308,9 +394,19 @@ def main():
 
     # Send to socket (fire and forget for non-permission events)
     # Attach any new JSONL lines so the Mac app can build message history
-    new_lines = read_new_jsonl_lines(transcript_path, session_id)
-    if new_lines:
-        state["remote_jsonl_lines"] = new_lines
+    if transcript_path:
+        new_lines = read_new_jsonl_lines(transcript_path, session_id)
+        if new_lines:
+            state["remote_jsonl_lines"] = new_lines
+    elif provider_id == "coco":
+        # Check standard Coco events location
+        home_dir = os.path.expanduser("~")
+        events_path = os.path.join(home_dir, "Library/Caches/coco/sessions", session_id, "events.jsonl")
+        if os.path.exists(events_path):
+            new_lines = read_new_jsonl_lines(events_path, session_id)
+            if new_lines:
+                state["remote_jsonl_lines"] = new_lines
+            
     send_event(state)
 
 

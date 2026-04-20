@@ -191,6 +191,18 @@ actor SessionStore {
         
         session.lastActivity = Date()
 
+        // If this is a remote event with new JSONL lines, cache them locally so
+        // ConversationParser can read them as if the session were local.
+        if let lines = event.remoteJsonlLines, !lines.isEmpty {
+            Self.logger.info("[Remote] Hook event \(event.event, privacy: .public) has \(lines.count) JSONL lines for session \(sessionId.prefix(8), privacy: .public)")
+            appendRemoteJsonlLines(lines, sessionId: sessionId, cwd: event.cwd)
+        } else {
+            Self.logger.info("[Remote] Hook event \(event.event, privacy: .public) for session \(sessionId.prefix(8), privacy: .public) has NO remote JSONL lines (remoteJsonlLines=\(event.remoteJsonlLines == nil ? "nil" : "empty", privacy: .public))")
+            if let debug = event.remotePathDebug, !debug.isEmpty {
+                Self.logger.info("[Remote] Path debug: \(debug.joined(separator: " | "), privacy: .public)")
+            }
+        }
+
         if event.status == "ended" {
             sessions.removeValue(forKey: sessionId)
             cancelPendingSync(sessionId: sessionId)
@@ -222,21 +234,10 @@ actor SessionStore {
         sessions[sessionId] = session
         publishState()
 
-        if event.shouldSyncFile {
+        if event.shouldSyncFile || (event.remoteJsonlLines?.isEmpty == false) || normalizedEvent == "agentend" || normalizedEvent == "agent_end" {
             scheduleFileSync(sessionId: sessionId, cwd: event.cwd)
         }
 
-        // If this is a remote event with new JSONL lines, cache them locally so
-        // ConversationParser can read them as if the session were local.
-        if let lines = event.remoteJsonlLines, !lines.isEmpty {
-            Self.logger.info("[Remote] Hook event \(event.event, privacy: .public) has \(lines.count) JSONL lines for session \(sessionId.prefix(8), privacy: .public)")
-            appendRemoteJsonlLines(lines, sessionId: sessionId, cwd: event.cwd)
-        } else {
-            Self.logger.info("[Remote] Hook event \(event.event, privacy: .public) for session \(sessionId.prefix(8), privacy: .public) has NO remote JSONL lines (remoteJsonlLines=\(event.remoteJsonlLines == nil ? "nil" : "empty", privacy: .public))")
-            if let debug = event.remotePathDebug, !debug.isEmpty {
-                Self.logger.info("[Remote] Path debug: \(debug.joined(separator: " | "), privacy: .public)")
-            }
-        }
     }
 
     private func createSession(from event: HookEvent) -> SessionState {
@@ -1122,8 +1123,20 @@ actor SessionStore {
                 await self?.process(.clearDetected(sessionId: sessionId))
             }
 
-            guard !result.newMessages.isEmpty || result.clearDetected else {
-                Self.logger.info("[Sync] No new messages for \(sessionId.prefix(8), privacy: .public), skipping fileUpdated")
+            var hasNewCompletions = false
+            if let session = await self?.session(for: sessionId) {
+                for item in session.chatItems {
+                    if case .toolCall(let tool) = item.type,
+                       (tool.status == .running || tool.status == .waitingForApproval),
+                       result.completedToolIds.contains(item.id) {
+                        hasNewCompletions = true
+                        break
+                    }
+                }
+            }
+
+            guard !result.newMessages.isEmpty || result.clearDetected || hasNewCompletions else {
+                Self.logger.info("[Sync] No new messages or completions for \(sessionId.prefix(8), privacy: .public), skipping fileUpdated")
                 return
             }
 

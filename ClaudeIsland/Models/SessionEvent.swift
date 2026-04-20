@@ -150,6 +150,14 @@ extension HookEvent {
             return .idle
         }
 
+        if normalizedEvent == "sessionend" {
+            return .ended
+        }
+        
+        if normalizedEvent == "agentend" || normalizedEvent == "agent_end" {
+            return .idle
+        }
+
         switch status {
         case "waiting_for_input":
             return .waitingForInput

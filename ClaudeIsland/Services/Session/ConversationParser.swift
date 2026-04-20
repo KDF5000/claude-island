@@ -49,7 +49,7 @@ actor ConversationParser {
     nonisolated static let logger = Logger(subsystem: "com.claudeisland", category: "Parser")
 
     /// Shared ISO8601 date formatter (expensive to create, reused across all message parsing)
-    nonisolated private static let isoFormatter: ISO8601DateFormatter = {
+    private let isoFormatter: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
@@ -70,6 +70,7 @@ actor ConversationParser {
         var lastFileOffset: UInt64 = 0
         var messages: [ChatMessage] = []
         var seenToolIds: Set<String> = []
+        var seenAssistantMessageIds: Set<String> = [] // Track assistant message IDs to deduplicate
         var toolIdToName: [String: String] = [:]  // Map tool_use_id to tool name
         var completedToolIds: Set<String> = []  // Tools that have received results
         var toolResults: [String: ToolResult] = [:]  // Tool results keyed by tool_use_id
@@ -139,7 +140,7 @@ actor ConversationParser {
         var lastUserMessageDate: Date?
         var usage = UsageInfo()
 
-        let formatter = Self.isoFormatter
+        let formatter = isoFormatter
 
         // First pass: collect usage from all assistant messages
         for line in lines {
@@ -491,6 +492,7 @@ actor ConversationParser {
             if line.contains("<command-name>/clear</command-name>") {
                 state.messages = []
                 state.seenToolIds = []
+                state.seenAssistantMessageIds = []
                 state.toolIdToName = [:]
                 state.completedToolIds = []
                 state.toolResults = [:]
@@ -591,14 +593,14 @@ actor ConversationParser {
             } else if line.contains("\"tool_call\"") || line.contains("\"tool_call_output\"") {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                   let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, toolIdToName: &state.toolIdToName) {
+                   let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, seenAssistantMessageIds: &state.seenAssistantMessageIds, toolIdToName: &state.toolIdToName) {
                     newMessages.append(message)
                     state.messages.append(message)
                 }
             } else if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") || line.contains("\"agent_start\"") || line.contains("\"message\"") || line.contains("\"agent_end\"") {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
-                    if let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, toolIdToName: &state.toolIdToName) {
+                    if let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, seenAssistantMessageIds: &state.seenAssistantMessageIds, toolIdToName: &state.toolIdToName) {
                         Self.logger.info("[Parser] Parsed message id=\(message.id.prefix(8), privacy: .public) role=\(String(describing: message.role), privacy: .public) blocks=\(message.content.count)")
                         newMessages.append(message)
                         state.messages.append(message)
@@ -698,52 +700,119 @@ actor ConversationParser {
         return nested
     }
 
-    private func parseMessageLine(_ json: [String: Any], seenToolIds: inout Set<String>, toolIdToName: inout [String: String]) -> ChatMessage? {
+    private func parseMessageLine(_ json: [String: Any], seenToolIds: inout Set<String>, seenAssistantMessageIds: inout Set<String>, toolIdToName: inout [String: String]) -> ChatMessage? {
+        
+        var roleStr: String?
+        var content: String?
+        let parsedMsgId = (json["id"] as? String) ?? UUID().uuidString
         
         if let messageOuter = json["message"] as? [String: Any],
-           let messageDict = messageOuter["message"] as? [String: Any],
-           let roleStr = messageDict["role"] as? String,
-           let content = messageDict["content"] as? String,
-           (messageDict["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true,
+           let innerMsg = messageOuter["message"] as? [String: Any] {
+            // Claude Code format
+            if (innerMsg["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true {
+                roleStr = innerMsg["role"] as? String
+                content = innerMsg["content"] as? String
+            }
+        } else if let type = json["type"] as? String, (type == "user" || type == "assistant"),
+                  let msg = json["message"] as? [String: Any] {
+            // Coco format message
+            if (msg["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true {
+                roleStr = msg["role"] as? String
+                content = msg["content"] as? String
+            }
+        } else if let userPromptSubmit = json["user_prompt_submit"] as? [String: Any],
+                  let prompt = userPromptSubmit["prompt"] as? String {
+            // Coco format user prompt
+            roleStr = "user"
+            content = prompt
+        } else if let agentStart = json["agent_start"] as? [String: Any],
+                  let input = agentStart["input"] as? [[String: Any]],
+                  let firstUser = input.first(where: { 
+                      ($0["role"] as? String) == "user" && 
+                      ($0["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false && 
+                      ($0["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true 
+                  }) {
+            // Coco format agent start
+            roleStr = "user"
+            content = firstUser["content"] as? String
+        }
+        
+        if let roleStr = roleStr,
+           let content = content,
            !content.hasPrefix("<system-reminder>") {
             
-            let msgId = (json["id"] as? String) ?? UUID().uuidString
             // Prevent exact duplicates of user messages from inner messages
-            if roleStr == "user" && seenToolIds.contains("msg-\(msgId)") {
+            if roleStr == "user" && seenToolIds.contains("msg-\(parsedMsgId)") {
                 return nil
             }
             if roleStr == "user" {
-                seenToolIds.insert("msg-\(msgId)")
+                seenToolIds.insert("msg-\(parsedMsgId)")
             }
             
-            let timestampStr = json["created_at"] as? String
-            let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
+            // Prevent duplicates of assistant messages 
+            // Often Coco sends multiple messages with the same ID or identical content
+            if roleStr == "assistant" {
+                let dedupId = "msg-\(parsedMsgId)"
+                if seenAssistantMessageIds.contains(dedupId) {
+                    return nil
+                }
+                seenAssistantMessageIds.insert(dedupId)
+            }
+            
+            let timestampStr = (json["created_at"] as? String) ?? (json["timestamp"] as? String)
+            let timestamp = timestampStr.flatMap { isoFormatter.date(from: $0) } ?? Date()
             let role: ChatRole = roleStr == "user" ? .user : .assistant
             
             return ChatMessage(
-                id: msgId,
+                id: parsedMsgId,
                 role: role,
                 timestamp: timestamp,
                 content: [.text(content)]
             )
         }
         
-        // Also support Coco agent_end for final summary
-        if let agentEnd = json["agent_end"] as? [String: Any],
-           let output = agentEnd["output"] as? [String: Any],
-           let roleStr = output["role"] as? String,
-           let content = output["content"] as? String {
-            
+        // Also support Coco agent_end for final summary or error
+        if let agentEnd = json["agent_end"] as? [String: Any] {
+            let msgId = (json["id"] as? String) ?? UUID().uuidString
             let timestampStr = json["created_at"] as? String
-            let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
-            let role: ChatRole = roleStr == "user" ? .user : .assistant
+            let timestamp = timestampStr.flatMap { isoFormatter.date(from: $0) } ?? Date()
             
-            return ChatMessage(
-                id: (json["id"] as? String) ?? UUID().uuidString,
-                role: role,
-                timestamp: timestamp,
-                content: [.text(content)]
-            )
+            if let output = agentEnd["output"] as? [String: Any],
+               let roleStr = output["role"] as? String,
+               let content = output["content"] as? String {
+                
+                // Prevent duplicates of assistant messages 
+                if roleStr == "assistant" {
+                    let dedupId = "msg-\(msgId)"
+                    if seenAssistantMessageIds.contains(dedupId) {
+                        return nil
+                    }
+                    seenAssistantMessageIds.insert(dedupId)
+                }
+                
+                let role: ChatRole = roleStr == "user" ? .user : .assistant
+                
+                return ChatMessage(
+                    id: msgId,
+                    role: role,
+                    timestamp: timestamp,
+                    content: [.text(content)]
+                )
+            } else if let errorMessage = agentEnd["error_message"] as? String {
+                // Handle error message case in agent_end
+                let dedupId = "msg-\(msgId)"
+                if seenAssistantMessageIds.contains(dedupId) {
+                    return nil
+                }
+                seenAssistantMessageIds.insert(dedupId)
+                
+                return ChatMessage(
+                    id: msgId,
+                    role: .assistant,
+                    timestamp: timestamp,
+                    content: [.text("⚠️ \(errorMessage)")]
+                )
+            }
         }
         
         guard let type = json["type"] as? String,
@@ -774,7 +843,7 @@ actor ConversationParser {
                 toolIdToName[toolCallId] = toolName
                 
                 let timestampStr = json["created_at"] as? String
-                let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
+                let timestamp = timestampStr.flatMap { isoFormatter.date(from: $0) } ?? Date()
                 
                 let toolBlock = ToolUseBlock(
                     id: toolCallId,
@@ -818,7 +887,7 @@ actor ConversationParser {
                     toolIdToName[toolCallId] = toolName
                     
                     let timestampStr = json["created_at"] as? String
-                    let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
+                    let timestamp = timestampStr.flatMap { isoFormatter.date(from: $0) } ?? Date()
                     
                     let toolBlock = ToolUseBlock(
                         id: toolCallId,
@@ -848,10 +917,20 @@ actor ConversationParser {
         guard let messageDict = json["message"] as? [String: Any] else {
             return nil
         }
+        
+        let msgId = (json["uuid"] as? String) ?? (json["id"] as? String) ?? UUID().uuidString
+        
+        if type == "assistant" {
+            let dedupId = "msg-\(msgId)"
+            if seenAssistantMessageIds.contains(dedupId) {
+                return nil
+            }
+            seenAssistantMessageIds.insert(dedupId)
+        }
 
         let timestamp: Date
         if let timestampStr = json["timestamp"] as? String {
-            timestamp = Self.isoFormatter.date(from: timestampStr) ?? Date()
+            timestamp = isoFormatter.date(from: timestampStr) ?? Date()
         } else {
             timestamp = Date()
         }
@@ -915,7 +994,7 @@ actor ConversationParser {
         let role: ChatRole = type == "user" ? .user : .assistant
 
         return ChatMessage(
-            id: uuid,
+            id: msgId,
             role: role,
             timestamp: timestamp,
             content: blocks
