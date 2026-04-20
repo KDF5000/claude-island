@@ -193,8 +193,8 @@ class SSHTunnelManager: ObservableObject {
         host: String,
         user: String?,
         sshPort: Int,
-        remotePort: Int = 19999,
-        localPort: Int = 19999
+        remotePort: Int = SSHTunnelManager.defaultPort,
+        localPort: Int = SSHTunnelManager.defaultPort
     ) -> Bool {
         if activeTunnels.contains(where: {
             $0.host == host && $0.user == user && $0.sshPort == sshPort && $0.localPort == localPort && ($0.process?.isRunning != false)
@@ -455,8 +455,8 @@ class SSHTunnelManager: ObservableObject {
         host: String,
         user: String? = nil,
         sshPort: Int = 22,
-        remotePort: Int = 19999,
-        localPort: Int = 19999,
+        remotePort: Int = SSHTunnelManager.defaultPort,
+        localPort: Int = SSHTunnelManager.defaultPort,
         didRetryAfterPortForwardFailure: Bool = false
     ) async -> SSHTunnel? {
         logger.info("Creating TCP SSH tunnel to \(host, privacy: .public):\(remotePort) -> localhost:\(localPort)")
@@ -476,7 +476,7 @@ class SSHTunnelManager: ObservableObject {
             "-o", "ServerAliveCountMax=3",
         ]
 
-        // Remote port forwarding: remote:19999 -> local:19999
+        // Remote port forwarding: remote:<remotePort> -> local:<localPort>
         args.append(contentsOf: [
             "-R", "\(remotePort):127.0.0.1:\(localPort)",
         ])
@@ -609,15 +609,21 @@ class SSHTunnelManager: ObservableObject {
     }
 
     /// Remove tunnels matching host/user/sshPort.
-    func removeTunnels(host: String, user: String?, sshPort: Int) async {
+    func removeTunnels(
+        host: String,
+        user: String?,
+        sshPort: Int,
+        remotePort: Int = SSHTunnelManager.defaultPort,
+        localPort: Int = SSHTunnelManager.defaultPort
+    ) async {
         // Best-effort: also terminate a matching tunnel process even if it was created
         // manually or by a previous app run (we won't have a `Process` handle).
         terminateStaleLocalSSHTunnels(
             host: host,
             user: user,
             sshPort: sshPort,
-            remotePort: 19999,
-            localPort: 19999
+            remotePort: remotePort,
+            localPort: localPort
         )
 
         let ids = activeTunnels
@@ -637,9 +643,12 @@ class SSHTunnelManager: ObservableObject {
         host: String,
         user: String? = nil,
         sshPort: Int = 22,
-        remotePath: String = "~/.claude/hooks/claude-island-remote-hook.py"
+        remotePath: String = "~/.claude/hooks/claude-island-remote-hook.py",
+        tcpPort: Int = SSHTunnelManager.defaultPort,
+        localPort: Int = SSHTunnelManager.defaultPort
     ) async -> Result<Void, Error> {
-        let script = loadBundledRemoteHookScript() ?? Self.fallbackRemoteHookScript
+        let baseScript = loadBundledRemoteHookScript() ?? Self.fallbackRemoteHookScript
+        let script = Self.patchRemoteHookScript(baseScript, tcpPort: tcpPort, localPort: localPort)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -711,6 +720,29 @@ class SSHTunnelManager: ObservableObject {
         } catch {
             return .failure(error)
         }
+    }
+
+    private static func patchRemoteHookScript(_ script: String, tcpPort: Int, localPort: Int) -> String {
+        // Keep the script self-contained (no env var dependency). We patch only the TCP port
+        // constant; unix socket path stays the same.
+        var out = script
+
+        // Replace any `TCP_PORT = <number>` assignment.
+        if let re = try? NSRegularExpression(pattern: "(?m)^TCP_PORT\\s*=\\s*\\d+\\s*$") {
+            let range = NSRange(out.startIndex..<out.endIndex, in: out)
+            out = re.stringByReplacingMatches(in: out, range: range, withTemplate: "TCP_PORT = \(tcpPort)")
+        }
+
+        // Best-effort update of the nearby comment if present.
+        if let re = try? NSRegularExpression(pattern: "(?m)^# TCP fallback \\(forwarded via SSH -R .*\\)\\s*$") {
+            let range = NSRange(out.startIndex..<out.endIndex, in: out)
+            out = re.stringByReplacingMatches(
+                in: out,
+                range: range,
+                withTemplate: "# TCP fallback (forwarded via SSH -R \(tcpPort):127.0.0.1:\(localPort))"
+            )
+        }
+        return out
     }
 
     private func loadBundledRemoteHookScript() -> String? {

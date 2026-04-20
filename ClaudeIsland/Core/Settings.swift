@@ -44,6 +44,9 @@ enum AppSettings {
         static let remoteSSHHost = "remoteSSHHost"
         static let remoteSSHUser = "remoteSSHUser"
         static let remoteSSHPort = "remoteSSHPort"
+
+        // Reverse tunnel listen port on the remote host (ssh -R <remotePort>:127.0.0.1:<localPort>)
+        static let remoteSSHTunnelPort = "remoteSSHTunnelPort"
     }
 
     // MARK: - Notification Sound
@@ -106,6 +109,21 @@ enum AppSettings {
         set {
             let clamped = max(1, min(65535, newValue))
             defaults.set(clamped, forKey: Keys.remoteSSHPort)
+        }
+    }
+
+    /// Remote reverse-tunnel port (default 19999).
+    ///
+    /// This is the port that will be bound on the *remote* host (remote 127.0.0.1:<port>)
+    /// and forwarded back to Claude Island running locally.
+    static var remoteSSHTunnelPort: Int {
+        get {
+            let value = defaults.integer(forKey: Keys.remoteSSHTunnelPort)
+            return value == 0 ? 19999 : value
+        }
+        set {
+            let clamped = max(1, min(65535, newValue))
+            defaults.set(clamped, forKey: Keys.remoteSSHTunnelPort)
         }
     }
 }

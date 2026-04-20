@@ -145,6 +145,7 @@ private struct RemoteSSHPickerRow: View {
     @State private var host: String = AppSettings.remoteSSHHost
     @State private var user: String = AppSettings.remoteSSHUser
     @State private var portText: String = String(AppSettings.remoteSSHPort)
+    @State private var tunnelPortText: String = String(AppSettings.remoteSSHTunnelPort)
 
     @State private var isWorking: Bool = false
     @State private var statusText: String? = nil
@@ -186,6 +187,11 @@ private struct RemoteSSHPickerRow: View {
         return max(1, min(65535, parsed))
     }
 
+    private var tunnelPort: Int {
+        let parsed = Int(tunnelPortText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? SSHTunnelManager.defaultPort
+        return max(1, min(65535, parsed))
+    }
+
     private var isConnected: Bool {
         if let id = connectedTunnelId,
            let tunnel = tunnelManager.activeTunnels.first(where: { $0.id == id }) {
@@ -200,8 +206,8 @@ private struct RemoteSSHPickerRow: View {
             host: normalizedHost,
             user: normalizedSSHIdentity.user,
             sshPort: sshPort,
-            remotePort: 19999,
-            localPort: 19999
+            remotePort: tunnelPort,
+            localPort: SSHTunnelManager.defaultPort
         )
     }
 
@@ -269,6 +275,7 @@ private struct RemoteSSHPickerRow: View {
                         LabeledField(label: "Host", text: $host, placeholder: "example.com")
                         LabeledField(label: "User", text: $user, placeholder: "optional")
                         LabeledField(label: "Port", text: $portText, placeholder: "22", width: 64)
+                        LabeledField(label: "Tunnel", text: $tunnelPortText, placeholder: String(SSHTunnelManager.defaultPort), width: 72)
                     }
 
                     HStack(spacing: 8) {
@@ -335,7 +342,7 @@ private struct RemoteSSHPickerRow: View {
                             .foregroundColor(Color(red: 1.0, green: 0.6, blue: 0.6).opacity(0.9))
                     }
 
-                    Text("提示：Connect 会在本机自动建立 ssh 反向转发（remote 127.0.0.1:19999 → local 127.0.0.1:19999），远端运行 hook 后即可把事件回传到 Claude Island。")
+                    Text("提示：Connect 会在本机自动建立 ssh 反向转发（remote 127.0.0.1:\(tunnelPort) → local 127.0.0.1:\(SSHTunnelManager.defaultPort)），远端运行 hook 后即可把事件回传到 Claude Island。")
                         .font(.system(size: 10))
                         .foregroundColor(.white.opacity(0.35))
                         .fixedSize(horizontal: false, vertical: true)
@@ -346,6 +353,7 @@ private struct RemoteSSHPickerRow: View {
                     host = AppSettings.remoteSSHHost
                     user = AppSettings.remoteSSHUser
                     portText = String(AppSettings.remoteSSHPort)
+                    tunnelPortText = String(AppSettings.remoteSSHTunnelPort)
                 }
             }
         }
@@ -358,15 +366,16 @@ private struct RemoteSSHPickerRow: View {
     private func suggestedSSHCommand() -> String {
         let hostString = normalizedSSHIdentity.user == nil ? normalizedHost : "\(normalizedUser)@\(normalizedHost)"
         if sshPort == 22 {
-            return "ssh -N -R 19999:127.0.0.1:19999 \(hostString)"
+            return "ssh -N -R \(tunnelPort):127.0.0.1:\(SSHTunnelManager.defaultPort) \(hostString)"
         }
-        return "ssh -N -p \(sshPort) -R 19999:127.0.0.1:19999 \(hostString)"
+        return "ssh -N -p \(sshPort) -R \(tunnelPort):127.0.0.1:\(SSHTunnelManager.defaultPort) \(hostString)"
     }
 
     private func persistSettings(enabled: Bool) {
         AppSettings.remoteSSHHost = normalizedHost
         AppSettings.remoteSSHUser = normalizedSSHIdentity.user ?? ""
         AppSettings.remoteSSHPort = sshPort
+        AppSettings.remoteSSHTunnelPort = tunnelPort
         AppSettings.remoteSSHEnabled = enabled
     }
 
@@ -381,7 +390,7 @@ private struct RemoteSSHPickerRow: View {
 
         let userValue = normalizedSSHIdentity.user
         persistSettings(enabled: false)
-        await tunnelManager.removeTunnels(host: normalizedHost, user: userValue, sshPort: sshPort)
+        await tunnelManager.removeTunnels(host: normalizedHost, user: userValue, sshPort: sshPort, remotePort: tunnelPort, localPort: SSHTunnelManager.defaultPort)
     }
 
     @MainActor
@@ -402,7 +411,7 @@ private struct RemoteSSHPickerRow: View {
         if isConnected {
             isWorking = true
             persistSettings(enabled: false)
-            await tunnelManager.removeTunnels(host: normalizedHost, user: userValue, sshPort: sshPort)
+            await tunnelManager.removeTunnels(host: normalizedHost, user: userValue, sshPort: sshPort, remotePort: tunnelPort, localPort: SSHTunnelManager.defaultPort)
             statusText = "已断开"
             connectedTunnelId = nil
             return
@@ -415,9 +424,15 @@ private struct RemoteSSHPickerRow: View {
 
         isWorking = true
         persistSettings(enabled: true)
-        await tunnelManager.removeTunnels(host: normalizedHost, user: userValue, sshPort: sshPort)
+        await tunnelManager.removeTunnels(host: normalizedHost, user: userValue, sshPort: sshPort, remotePort: tunnelPort, localPort: SSHTunnelManager.defaultPort)
 
-        let tunnel = await tunnelManager.createTCPTunnel(host: normalizedHost, user: userValue, sshPort: sshPort)
+        let tunnel = await tunnelManager.createTCPTunnel(
+            host: normalizedHost,
+            user: userValue,
+            sshPort: sshPort,
+            remotePort: tunnelPort,
+            localPort: SSHTunnelManager.defaultPort
+        )
 
         if tunnel == nil {
             persistSettings(enabled: false)
@@ -445,7 +460,13 @@ private struct RemoteSSHPickerRow: View {
 
         isWorking = true
         let userValue = normalizedSSHIdentity.user
-        let result = await tunnelManager.installRemoteHook(host: normalizedHost, user: userValue, sshPort: sshPort)
+        let result = await tunnelManager.installRemoteHook(
+            host: normalizedHost,
+            user: userValue,
+            sshPort: sshPort,
+            tcpPort: tunnelPort,
+            localPort: SSHTunnelManager.defaultPort
+        )
         isWorking = false
 
         switch result {

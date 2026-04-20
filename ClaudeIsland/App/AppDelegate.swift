@@ -85,8 +85,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
             let user = AppSettings.remoteSSHUser.isEmpty ? nil : AppSettings.remoteSSHUser
             let port = AppSettings.remoteSSHPort
-            await SSHTunnelManager.shared.removeTunnels(host: host, user: user, sshPort: port)
-            _ = await SSHTunnelManager.shared.createTCPTunnel(host: host, user: user, sshPort: port)
+            let tunnelPort = AppSettings.remoteSSHTunnelPort
+            await SSHTunnelManager.shared.removeTunnels(host: host, user: user, sshPort: port, remotePort: tunnelPort, localPort: SSHTunnelManager.defaultPort)
+            _ = await SSHTunnelManager.shared.createTCPTunnel(host: host, user: user, sshPort: port, remotePort: tunnelPort, localPort: SSHTunnelManager.defaultPort)
         }
 
         NSApplication.shared.setActivationPolicy(.accessory)
