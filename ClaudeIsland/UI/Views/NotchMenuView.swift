@@ -7,21 +7,12 @@
 
 import ApplicationServices
 import AppKit
-import Combine
 import SwiftUI
-import ServiceManagement
-import Sparkle
 
 // MARK: - NotchMenuView
 
 struct NotchMenuView: View {
     @ObservedObject var viewModel: NotchViewModel
-    @ObservedObject private var updateManager = UpdateManager.shared
-    @ObservedObject private var screenSelector = ScreenSelector.shared
-    @ObservedObject private var soundSelector = SoundSelector.shared
-    @ObservedObject private var sshTunnelManager = SSHTunnelManager.shared
-    @State private var hooksInstalled: Bool = false
-    @State private var launchAtLogin: Bool = false
 
     var body: some View {
         // ScrollView so the menu gracefully scrolls when content exceeds the
@@ -40,65 +31,12 @@ struct NotchMenuView: View {
                     .background(Color.white.opacity(0.08))
                     .padding(.vertical, 4)
 
-                // Appearance settings
-                ScreenPickerRow(screenSelector: screenSelector)
-                SoundPickerRow(soundSelector: soundSelector)
-                ClaudeDirPickerRow()
-                RemoteSSHPickerRow(tunnelManager: sshTunnelManager)
-
-                Divider()
-                    .background(Color.white.opacity(0.08))
-                    .padding(.vertical, 4)
-
-                // System settings
-                MenuToggleRow(
-                    icon: "power",
-                    label: "Launch at Login",
-                    isOn: launchAtLogin
-                ) {
-                    do {
-                        if launchAtLogin {
-                            try SMAppService.mainApp.unregister()
-                            launchAtLogin = false
-                        } else {
-                            try SMAppService.mainApp.register()
-                            launchAtLogin = true
-                        }
-                    } catch {
-                        print("Failed to toggle launch at login: \(error)")
-                    }
-                }
-
-                MenuToggleRow(
-                    icon: "arrow.triangle.2.circlepath",
-                    label: "Hooks",
-                    isOn: hooksInstalled
-                ) {
-                    if hooksInstalled {
-                        HookInstaller.uninstall()
-                        hooksInstalled = false
-                    } else {
-                        HookInstaller.installIfNeeded()
-                        hooksInstalled = true
-                    }
-                }
-
-                AccessibilityRow(isEnabled: AXIsProcessTrusted())
-
-                Divider()
-                    .background(Color.white.opacity(0.08))
-                    .padding(.vertical, 4)
-
-                // About
-                UpdateRow(updateManager: updateManager)
-
                 MenuRow(
-                    icon: "star",
-                    label: "Star on GitHub"
+                    icon: "gearshape",
+                    label: "Settings"
                 ) {
-                    if let url = URL(string: "https://github.com/farouqaldori/claude-island") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    AppDelegate.shared?.showSettingsWindow()
+                    viewModel.toggleMenu()
                 }
 
                 Divider()
@@ -117,26 +55,12 @@ struct NotchMenuView: View {
             .padding(.vertical, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .onAppear {
-            refreshStates()
-        }
-        .onChange(of: viewModel.contentType) { _, newValue in
-            if newValue == .menu {
-                refreshStates()
-            }
-        }
-    }
-
-    private func refreshStates() {
-        hooksInstalled = HookInstaller.isInstalled()
-        launchAtLogin = SMAppService.mainApp.status == .enabled
-        screenSelector.refreshScreens()
     }
 }
 
 // MARK: - Remote SSH Picker Row
 
-private struct RemoteSSHPickerRow: View {
+struct RemoteSSHPickerRow: View {
     @ObservedObject var tunnelManager: SSHTunnelManager
 
     @State private var isHovered: Bool = false
@@ -805,7 +729,7 @@ struct AccessibilityRow: View {
     private var currentlyEnabled: Bool {
         // Re-check on each render when refreshTrigger changes
         _ = refreshTrigger
-        return isEnabled
+        return AXIsProcessTrusted()
     }
 
     var body: some View {
@@ -821,7 +745,7 @@ struct AccessibilityRow: View {
 
             Spacer()
 
-            if isEnabled {
+            if currentlyEnabled {
                 Circle()
                     .fill(TerminalColors.green)
                     .frame(width: 6, height: 6)
