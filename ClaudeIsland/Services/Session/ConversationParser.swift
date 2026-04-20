@@ -187,12 +187,13 @@ actor ConversationParser {
                 msgContent = prompt
             } else if let agentStart = json["agent_start"] as? [String: Any],
                       let input = agentStart["input"] as? [[String: Any]],
-                      let firstUser = input.first(where: { ($0["role"] as? String) == "user" && ($0["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false }) {
+                      let firstUser = input.first(where: { ($0["role"] as? String) == "user" && ($0["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false && ($0["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true }) {
                 msgContent = firstUser["content"] as? String
             } else if let messageOuter = json["message"] as? [String: Any],
                       let innerMsg = messageOuter["message"] as? [String: Any],
                       innerMsg["role"] as? String == "user",
-                      (innerMsg["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false {
+                      (innerMsg["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false,
+                      (innerMsg["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true {
                 msgContent = innerMsg["content"] as? String
             }
 
@@ -701,7 +702,7 @@ actor ConversationParser {
         // Try Coco format first (agent_start / message)
         if let agentStart = json["agent_start"] as? [String: Any],
            let input = agentStart["input"] as? [[String: Any]],
-           let firstUser = input.first(where: { ($0["role"] as? String) == "user" }),
+           let firstUser = input.first(where: { ($0["role"] as? String) == "user" && ($0["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true }),
            let content = firstUser["content"] as? String,
            !content.hasPrefix("<system-reminder>") {
             
@@ -719,7 +720,9 @@ actor ConversationParser {
         if let messageOuter = json["message"] as? [String: Any],
            let messageDict = messageOuter["message"] as? [String: Any],
            let roleStr = messageDict["role"] as? String,
-           let content = messageDict["content"] as? String {
+           let content = messageDict["content"] as? String,
+           (messageDict["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true,
+           !content.hasPrefix("<system-reminder>") {
             
             let timestampStr = json["created_at"] as? String
             let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
