@@ -104,30 +104,14 @@ def send_event(state, wait_for_response=False, transcript_path=None):
                 pass
             return None
             
-        start_mtime = _try_get_mtime(transcript_path)
-        deadline = time.time() + TIMEOUT_SECONDS
-        
-        while time.time() < deadline:
-            # For Coco, any transcript change means the user interacted with the terminal
-            # so we should stop waiting and let the terminal take over
-            current_mtime = _try_get_mtime(transcript_path)
-            if start_mtime is not None and current_mtime is not None and current_mtime > start_mtime:
-                # The user likely answered the prompt in the terminal
-                return {"decision": "ask"}
-                
-            try:
-                sock.settimeout(0.25)
-                response = sock.recv(4096)
-                if not response:
-                    break
+        try:
+            sock.settimeout(TIMEOUT_SECONDS)
+            response = sock.recv(4096)
+            if response:
                 return json.loads(response.decode())
-            except socket.timeout:
-                continue
-            except json.JSONDecodeError:
-                break
-            except Exception:
-                break
-                
+        except (socket.timeout, json.JSONDecodeError, OSError):
+            pass
+            
         return None
     except (socket.error, OSError, FileNotFoundError):
         if sock:
@@ -152,30 +136,14 @@ def send_event(state, wait_for_response=False, transcript_path=None):
                 pass
             return None
             
-        start_mtime = _try_get_mtime(transcript_path)
-        deadline = time.time() + TIMEOUT_SECONDS
-        
-        while time.time() < deadline:
-            # For Coco, any transcript change means the user interacted with the terminal
-            # so we should stop waiting and let the terminal take over
-            current_mtime = _try_get_mtime(transcript_path)
-            if start_mtime is not None and current_mtime is not None and current_mtime > start_mtime:
-                # The user likely answered the prompt in the terminal
-                return {"decision": "ask"}
-                
-            try:
-                sock.settimeout(0.25)
-                response = sock.recv(4096)
-                if not response:
-                    break
+        try:
+            sock.settimeout(TIMEOUT_SECONDS)
+            response = sock.recv(4096)
+            if response:
                 return json.loads(response.decode())
-            except socket.timeout:
-                continue
-            except json.JSONDecodeError:
-                break
-            except Exception:
-                break
-                
+        except (socket.timeout, json.JSONDecodeError, OSError):
+            pass
+            
         return None
     except (socket.error, OSError, json.JSONDecodeError) as e:
         print(f"ClaudeIsland remote hook error: {e}", file=sys.stderr)
