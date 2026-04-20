@@ -4,6 +4,7 @@ import Mixpanel
 import Sparkle
 import SwiftUI
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var windowManager: WindowManager?
     private var screenObserver: ScreenObserver?
@@ -68,6 +69,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Mixpanel.mainInstance().flush()
 
         HookInstaller.installIfNeeded()
+
+        // Start all available providers (including Coco/Trae CLI)
+        Task {
+            await ProviderRegistry.shared.startAll()
+        }
+
+        // Auto-connect Remote SSH tunnel if configured.
+        Task {
+            let host = AppSettings.remoteSSHHost
+            guard AppSettings.remoteSSHEnabled,
+                  !host.isEmpty,
+                  SSHTunnelManager.shared.isTunnelSupported
+            else { return }
+
+            let user = AppSettings.remoteSSHUser.isEmpty ? nil : AppSettings.remoteSSHUser
+            let port = AppSettings.remoteSSHPort
+            await SSHTunnelManager.shared.removeTunnels(host: host, user: user, sshPort: port)
+            _ = await SSHTunnelManager.shared.createTCPTunnel(host: host, user: user, sshPort: port)
+        }
+
         NSApplication.shared.setActivationPolicy(.accessory)
 
         windowManager = WindowManager()

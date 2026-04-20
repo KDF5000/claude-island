@@ -103,8 +103,7 @@ actor ConversationParser {
     /// Parse a JSONL file to extract conversation info
     /// Uses caching based on file modification time
     func parse(sessionId: String, cwd: String) -> ConversationInfo {
-        let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
-        let sessionFile = ClaudePaths.projectsDir.path + "/" + projectDir + "/" + sessionId + ".jsonl"
+        let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
 
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: sessionFile),
@@ -149,13 +148,22 @@ actor ConversationParser {
                 continue
             }
 
-            if json["type"] as? String == "assistant",
-               let message = json["message"] as? [String: Any],
-               let usageDict = message["usage"] as? [String: Any] {
-                usage.inputTokens += usageDict["input_tokens"] as? Int ?? 0
-                usage.outputTokens += usageDict["output_tokens"] as? Int ?? 0
-                usage.cacheReadTokens += usageDict["cache_read_input_tokens"] as? Int ?? 0
-                usage.cacheCreationTokens += usageDict["cache_creation_input_tokens"] as? Int ?? 0
+            if json["type"] as? String == "assistant" || json["message"] != nil {
+                let message: [String: Any]?
+                if let type = json["type"] as? String, type == "assistant" {
+                    message = json["message"] as? [String: Any]
+                } else if let outerMsg = json["message"] as? [String: Any], let innerMsg = outerMsg["message"] as? [String: Any], innerMsg["role"] as? String == "assistant" {
+                    message = innerMsg
+                } else {
+                    continue
+                }
+
+                if let usageDict = message?["usage"] as? [String: Any] {
+                    usage.inputTokens += usageDict["input_tokens"] as? Int ?? 0
+                    usage.outputTokens += usageDict["output_tokens"] as? Int ?? 0
+                    usage.cacheReadTokens += usageDict["cache_read_input_tokens"] as? Int ?? 0
+                    usage.cacheCreationTokens += usageDict["cache_creation_input_tokens"] as? Int ?? 0
+                }
             }
         }
 
@@ -165,16 +173,33 @@ actor ConversationParser {
                 continue
             }
 
+            // Extract message payload handling both Claude Code and Coco formats
+            var msgContent: String?
             let type = json["type"] as? String
             let isMeta = json["isMeta"] as? Bool ?? false
-
+            
             if type == "user" && !isMeta {
-                if let message = json["message"] as? [String: Any],
-                   let msgContent = message["content"] as? String {
-                    if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
-                        firstUserMessage = Self.truncateMessage(msgContent, maxLength: 50)
-                        break
-                    }
+                if let message = json["message"] as? [String: Any] {
+                    msgContent = message["content"] as? String
+                }
+            } else if let userPromptSubmit = json["user_prompt_submit"] as? [String: Any],
+                      let prompt = userPromptSubmit["prompt"] as? String {
+                msgContent = prompt
+            } else if let agentStart = json["agent_start"] as? [String: Any],
+                      let input = agentStart["input"] as? [[String: Any]],
+                      let firstUser = input.first(where: { ($0["role"] as? String) == "user" && ($0["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false }) {
+                msgContent = firstUser["content"] as? String
+            } else if let messageOuter = json["message"] as? [String: Any],
+                      let innerMsg = messageOuter["message"] as? [String: Any],
+                      innerMsg["role"] as? String == "user",
+                      (innerMsg["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false {
+                msgContent = innerMsg["content"] as? String
+            }
+
+            if let content = msgContent {
+                if !content.hasPrefix("<command-name>") && !content.hasPrefix("<local-command") && !content.hasPrefix("Caveat:") && !content.hasPrefix("<system-reminder>") {
+                    firstUserMessage = Self.truncateMessage(content, maxLength: 50)
+                    break
                 }
             }
         }
@@ -186,33 +211,75 @@ actor ConversationParser {
                 continue
             }
 
-            let type = json["type"] as? String
+            var type = json["type"] as? String
+            let isMeta = json["isMeta"] as? Bool ?? false
+            
+            // Extract message for Claude Code and Coco format
+            var messageDict: [String: Any]?
+            var contentStr: String?
+            var contentArray: [[String: Any]]?
+            
+            if type == "user" || type == "assistant" {
+                if !isMeta, let message = json["message"] as? [String: Any],
+                   (message["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false,
+                   (message["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true {
+                    messageDict = message
+                    contentStr = message["content"] as? String
+                    contentArray = message["content"] as? [[String: Any]]
+                }
+            } else if let userPromptSubmit = json["user_prompt_submit"] as? [String: Any],
+                      let prompt = userPromptSubmit["prompt"] as? String {
+                type = "user"
+                contentStr = prompt
+            } else if let agentStart = json["agent_start"] as? [String: Any],
+                      let input = agentStart["input"] as? [[String: Any]],
+                      let firstUser = input.first(where: { ($0["role"] as? String) == "user" && ($0["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false && ($0["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true }) {
+                type = "user"
+                contentStr = firstUser["content"] as? String
+            } else if let messageOuter = json["message"] as? [String: Any],
+                      let innerMsg = messageOuter["message"] as? [String: Any],
+                      (innerMsg["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false,
+                      (innerMsg["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true {
+                type = innerMsg["role"] as? String
+                contentStr = innerMsg["content"] as? String
+            } else if let toolCallOuter = json["tool_call"] as? [String: Any],
+                      let toolInfo = toolCallOuter["tool_info"] as? [String: Any] {
+                // Coco tool use
+                let toolName = toolInfo["name"] as? String ?? "Tool"
+                if lastMessage == nil {
+                    var toolInputStr = ""
+                    if let input = toolCallOuter["input"] as? [String: Any],
+                       let structuredInput = input["structured_input"] as? [String: Any] {
+                        toolInputStr = Self.formatToolInput(structuredInput, toolName: toolName)
+                    }
+                    lastMessage = toolInputStr.isEmpty ? toolName : toolInputStr
+                    lastMessageRole = "tool"
+                    lastToolName = toolName
+                }
+            }
 
             if lastMessage == nil {
                 if type == "user" || type == "assistant" {
-                    let isMeta = json["isMeta"] as? Bool ?? false
-                    if !isMeta, let message = json["message"] as? [String: Any] {
-                        if let msgContent = message["content"] as? String {
-                            if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
-                                lastMessage = msgContent
-                                lastMessageRole = type
-                            }
-                        } else if let contentArray = message["content"] as? [[String: Any]] {
-                            for block in contentArray.reversed() {
-                                let blockType = block["type"] as? String
-                                if blockType == "tool_use" {
-                                    let toolName = block["name"] as? String ?? "Tool"
-                                    let toolInput = Self.formatToolInput(block["input"] as? [String: Any], toolName: toolName)
-                                    lastMessage = toolInput
-                                    lastMessageRole = "tool"
-                                    lastToolName = toolName
+                    if let msgContent = contentStr {
+                        if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") && !msgContent.hasPrefix("<system-reminder>") {
+                            lastMessage = msgContent
+                            lastMessageRole = type
+                        }
+                    } else if let array = contentArray {
+                        for block in array.reversed() {
+                            let blockType = block["type"] as? String
+                            if blockType == "tool_use" {
+                                let toolName = block["name"] as? String ?? "Tool"
+                                let toolInput = Self.formatToolInput(block["input"] as? [String: Any], toolName: toolName)
+                                lastMessage = toolInput
+                                lastMessageRole = "tool"
+                                lastToolName = toolName
+                                break
+                            } else if blockType == "text", let text = block["text"] as? String {
+                                if !text.hasPrefix("[Request interrupted by user") && !text.hasPrefix("<system-reminder>") {
+                                    lastMessage = text
+                                    lastMessageRole = type
                                     break
-                                } else if blockType == "text", let text = block["text"] as? String {
-                                    if !text.hasPrefix("[Request interrupted by user") {
-                                        lastMessage = text
-                                        lastMessageRole = type
-                                        break
-                                    }
                                 }
                             }
                         }
@@ -221,21 +288,25 @@ actor ConversationParser {
             }
 
             if !foundLastUserMessage && type == "user" {
-                let isMeta = json["isMeta"] as? Bool ?? false
-                if !isMeta, let message = json["message"] as? [String: Any] {
-                    if let msgContent = message["content"] as? String {
-                        if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") {
-                            if let timestampStr = json["timestamp"] as? String {
-                                lastUserMessageDate = formatter.date(from: timestampStr)
-                            }
-                            foundLastUserMessage = true
+                if let msgContent = contentStr {
+                    if !msgContent.hasPrefix("<command-name>") && !msgContent.hasPrefix("<local-command") && !msgContent.hasPrefix("Caveat:") && !msgContent.hasPrefix("<system-reminder>") {
+                        let timestampStr = (json["timestamp"] as? String) ?? (json["created_at"] as? String)
+                        if let tsStr = timestampStr {
+                            lastUserMessageDate = formatter.date(from: tsStr)
                         }
+                        foundLastUserMessage = true
                     }
                 }
             }
 
-            if summary == nil, type == "summary", let summaryText = json["summary"] as? String {
-                summary = summaryText
+            if summary == nil {
+                if type == "summary", let summaryText = json["summary"] as? String {
+                    summary = summaryText
+                } else if let stateUpdate = json["state_update"] as? [String: Any],
+                          let updates = stateUpdate["updates"] as? [String: Any],
+                          let title = updates["title"] as? String, !title.isEmpty {
+                    summary = title
+                }
             }
 
             if summary != nil && lastMessage != nil && foundLastUserMessage {
@@ -424,45 +495,98 @@ actor ConversationParser {
                 continue
             }
 
-            if line.contains("\"tool_result\"") {
+            if line.contains("\"tool_result\"") || line.contains("\"tool_call_output\"") {
                 if let lineData = line.data(using: .utf8),
-                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                   let messageDict = json["message"] as? [String: Any],
-                   let contentArray = messageDict["content"] as? [[String: Any]] {
-                    let toolUseResult = json["toolUseResult"] as? [String: Any]
-                    let topLevelToolName = json["toolName"] as? String
-                    let stdout = toolUseResult?["stdout"] as? String
-                    let stderr = toolUseResult?["stderr"] as? String
+                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
+                   
+                   // Claude Code format
+                   if let messageDict = json["message"] as? [String: Any],
+                      let contentArray = messageDict["content"] as? [[String: Any]] {
+                        let toolUseResult = json["toolUseResult"] as? [String: Any]
+                        let topLevelToolName = json["toolName"] as? String
+                        let stdout = toolUseResult?["stdout"] as? String
+                        let stderr = toolUseResult?["stderr"] as? String
 
-                    for block in contentArray {
-                        if block["type"] as? String == "tool_result",
-                           let toolUseId = block["tool_use_id"] as? String {
-                            state.completedToolIds.insert(toolUseId)
+                        for block in contentArray {
+                            if block["type"] as? String == "tool_result",
+                               let toolUseId = block["tool_use_id"] as? String {
+                                state.completedToolIds.insert(toolUseId)
 
-                            let content = block["content"] as? String
-                            let isError = block["is_error"] as? Bool ?? false
-                            state.toolResults[toolUseId] = ToolResult(
-                                content: content,
-                                stdout: stdout,
-                                stderr: stderr,
-                                isError: isError
-                            )
-
-                            let toolName = topLevelToolName ?? state.toolIdToName[toolUseId]
-
-                            if let toolUseResult = toolUseResult,
-                               let name = toolName {
-                                let structured = Self.parseStructuredResult(
-                                    toolName: name,
-                                    toolUseResult: toolUseResult,
+                                let content = block["content"] as? String
+                                let isError = block["is_error"] as? Bool ?? false
+                                state.toolResults[toolUseId] = ToolResult(
+                                    content: content,
+                                    stdout: stdout,
+                                    stderr: stderr,
                                     isError: isError
                                 )
-                                state.structuredResults[toolUseId] = structured
+
+                                let toolName = topLevelToolName ?? state.toolIdToName[toolUseId]
+
+                                if let toolUseResult = toolUseResult,
+                                   let name = toolName {
+                                    let structured = Self.parseStructuredResult(
+                                        toolName: name,
+                                        toolUseResult: toolUseResult,
+                                        isError: isError
+                                    )
+                                    state.structuredResults[toolUseId] = structured
+                                }
                             }
                         }
                     }
+                    // Coco format
+                    else if let toolCallOutput = json["tool_call_output"] as? [String: Any],
+                            let toolUseId = toolCallOutput["tool_call_id"] as? String {
+                        state.completedToolIds.insert(toolUseId)
+                        
+                        var content: String?
+                        var stdout: String?
+                        var stderr: String?
+                        var isError = false
+                        
+                        if let output = toolCallOutput["output"] as? [String: Any] {
+                            isError = output["is_error"] as? Bool ?? false
+                            
+                            // Check for content array
+                            if let contentArray = output["content"] as? [[String: Any]] {
+                                content = contentArray.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                            } else {
+                                // Some tools might format output differently
+                                content = output["stdout"] as? String ?? output["text"] as? String
+                            }
+                            
+                            stdout = output["stdout"] as? String
+                            stderr = output["stderr"] as? String
+                        }
+                        
+                        state.toolResults[toolUseId] = ToolResult(
+                            content: content,
+                            stdout: stdout,
+                            stderr: stderr,
+                            isError: isError
+                        )
+                        
+                        if let toolInfo = toolCallOutput["tool_info"] as? [String: Any],
+                           let toolName = toolInfo["name"] as? String,
+                           let output = toolCallOutput["output"] as? [String: Any] {
+                            let structured = Self.parseStructuredResult(
+                                toolName: toolName,
+                                toolUseResult: output,
+                                isError: isError
+                            )
+                            state.structuredResults[toolUseId] = structured
+                        }
+                    }
                 }
-            } else if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") {
+            } else if line.contains("\"tool_call\"") || line.contains("\"tool_call_output\"") {
+                if let lineData = line.data(using: .utf8),
+                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                   let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, toolIdToName: &state.toolIdToName) {
+                    newMessages.append(message)
+                    state.messages.append(message)
+                }
+            } else if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") || line.contains("\"agent_start\"") || line.contains("\"message\"") || line.contains("\"agent_end\"") {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
                    let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, toolIdToName: &state.toolIdToName) {
@@ -507,8 +631,15 @@ actor ConversationParser {
         return true
     }
 
-    /// Build session file path
+    /// Path to the JSONL file
     private static func sessionFilePath(sessionId: String, cwd: String) -> String {
+        // Local Coco (Trae CLI) sessions: events.jsonl has conversation messages.
+        // traces.jsonl is OpenTelemetry spans only and cannot be parsed for messages.
+        let cocoPath = NSHomeDirectory() + "/Library/Caches/coco/sessions/\(sessionId)/events.jsonl"
+        if FileManager.default.fileExists(atPath: cocoPath) {
+            return cocoPath
+        }
+
         let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
         return ClaudePaths.projectsDir.path + "/" + projectDir + "/" + sessionId + ".jsonl"
     }
@@ -536,8 +667,147 @@ actor ConversationParser {
     }
 
     private func parseMessageLine(_ json: [String: Any], seenToolIds: inout Set<String>, toolIdToName: inout [String: String]) -> ChatMessage? {
+        // Try Coco format first (agent_start / message)
+        if let agentStart = json["agent_start"] as? [String: Any],
+           let input = agentStart["input"] as? [[String: Any]],
+           let firstUser = input.first(where: { ($0["role"] as? String) == "user" }),
+           let content = firstUser["content"] as? String,
+           !content.hasPrefix("<system-reminder>") {
+            
+            let timestampStr = json["created_at"] as? String
+            let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
+            
+            return ChatMessage(
+                id: (json["id"] as? String) ?? UUID().uuidString,
+                role: .user,
+                timestamp: timestamp,
+                content: [.text(content)]
+            )
+        }
+        
+        if let messageOuter = json["message"] as? [String: Any],
+           let messageDict = messageOuter["message"] as? [String: Any],
+           let roleStr = messageDict["role"] as? String,
+           let content = messageDict["content"] as? String {
+            
+            let timestampStr = json["created_at"] as? String
+            let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
+            let role: ChatRole = roleStr == "user" ? .user : .assistant
+            
+            return ChatMessage(
+                id: (json["id"] as? String) ?? UUID().uuidString,
+                role: role,
+                timestamp: timestamp,
+                content: [.text(content)]
+            )
+        }
+        
+        // Also support Coco agent_end for final summary
+        if let agentEnd = json["agent_end"] as? [String: Any],
+           let output = agentEnd["output"] as? [String: Any],
+           let roleStr = output["role"] as? String,
+           let content = output["content"] as? String {
+            
+            let timestampStr = json["created_at"] as? String
+            let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
+            let role: ChatRole = roleStr == "user" ? .user : .assistant
+            
+            return ChatMessage(
+                id: (json["id"] as? String) ?? UUID().uuidString,
+                role: role,
+                timestamp: timestamp,
+                content: [.text(content)]
+            )
+        }
+        
         guard let type = json["type"] as? String,
               let uuid = json["uuid"] as? String else {
+            // Coco format fallback
+            if let toolCallOuter = json["tool_call"] as? [String: Any],
+               let toolCallId = toolCallOuter["tool_call_id"] as? String,
+               let toolInfo = toolCallOuter["tool_info"] as? [String: Any],
+               let toolName = toolInfo["name"] as? String {
+                
+                var inputDict: [String: String] = [:]
+                if let input = toolCallOuter["input"] as? [String: Any],
+                   let structuredInput = input["structured_input"] as? [String: Any] {
+                    for (key, value) in structuredInput {
+                        if let strValue = value as? String {
+                            inputDict[key] = strValue
+                        } else if let intValue = value as? Int {
+                            inputDict[key] = String(intValue)
+                        } else if let boolValue = value as? Bool {
+                            inputDict[key] = boolValue ? "true" : "false"
+                        } else {
+                            inputDict[key] = String(describing: value)
+                        }
+                    }
+                }
+                
+                seenToolIds.insert(toolCallId)
+                toolIdToName[toolCallId] = toolName
+                
+                let timestampStr = json["created_at"] as? String
+                let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
+                
+                let toolBlock = ToolUseBlock(
+                    id: toolCallId,
+                    name: toolName,
+                    input: inputDict
+                )
+                
+                return ChatMessage(
+                    id: (json["id"] as? String) ?? UUID().uuidString,
+                    role: .assistant,
+                    timestamp: timestamp,
+                    content: [.toolUse(toolBlock)]
+                )
+            }
+            
+            // Also check tool_call_output for tools since newer formats might only have this
+            if let toolCallOuter = json["tool_call_output"] as? [String: Any],
+               let toolCallId = toolCallOuter["tool_call_id"] as? String,
+               let toolInfo = toolCallOuter["tool_info"] as? [String: Any],
+               let toolName = toolInfo["name"] as? String {
+                
+                // Only create the tool call if we haven't seen it yet
+                if !seenToolIds.contains(toolCallId) {
+                    var inputDict: [String: String] = [:]
+                    if let input = toolCallOuter["input"] as? [String: Any],
+                       let structuredInput = input["structured_input"] as? [String: Any] {
+                        for (key, value) in structuredInput {
+                            if let strValue = value as? String {
+                                inputDict[key] = strValue
+                            } else if let intValue = value as? Int {
+                                inputDict[key] = String(intValue)
+                            } else if let boolValue = value as? Bool {
+                                inputDict[key] = boolValue ? "true" : "false"
+                            } else {
+                                inputDict[key] = String(describing: value)
+                            }
+                        }
+                    }
+                    
+                    seenToolIds.insert(toolCallId)
+                    toolIdToName[toolCallId] = toolName
+                    
+                    let timestampStr = json["created_at"] as? String
+                    let timestamp = timestampStr.flatMap { Self.isoFormatter.date(from: $0) } ?? Date()
+                    
+                    let toolBlock = ToolUseBlock(
+                        id: toolCallId,
+                        name: toolName,
+                        input: inputDict
+                    )
+                    
+                    return ChatMessage(
+                        id: (json["id"] as? String) ?? UUID().uuidString,
+                        role: .assistant,
+                        timestamp: timestamp,
+                        content: [.toolUse(toolBlock)]
+                    )
+                }
+            }
             return nil
         }
 

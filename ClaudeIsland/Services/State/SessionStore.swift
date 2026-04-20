@@ -124,6 +124,32 @@ actor SessionStore {
     private func processHookEvent(_ event: HookEvent) async {
         let sessionId = event.sessionId
         let isNewSession = sessions[sessionId] == nil
+
+        // If this is a new session from a known PID or TTY, it's likely a resume or restart
+        // Remove old sessions associated with the same PID/TTY to avoid duplicates
+        if isNewSession {
+            var staleSessions: [String: SessionState] = [:]
+            
+            // 1. Try to deduplicate by PID
+            if let newPid = event.pid {
+                let matching = sessions.filter { $0.value.pid == newPid && $0.key != sessionId }
+                for (k, v) in matching { staleSessions[k] = v }
+            }
+            
+            // 2. Try to deduplicate by TTY (only if it's a valid TTY)
+            if let newTty = event.tty?.replacingOccurrences(of: "/dev/", with: ""),
+               !newTty.isEmpty, newTty != "no tty", newTty != "??" {
+                let matching = sessions.filter { $0.value.tty == newTty && $0.key != sessionId }
+                for (k, v) in matching { staleSessions[k] = v }
+            }
+            
+            for (staleId, staleSession) in staleSessions {
+                Self.logger.debug("Removing stale session \(staleId.prefix(8), privacy: .public) as process (PID: \(staleSession.pid ?? 0), TTY: \(staleSession.tty ?? "none")) started a new session")
+                sessions.removeValue(forKey: staleId)
+                cancelPendingSync(sessionId: staleId)
+            }
+        }
+
         var session = sessions[sessionId] ?? createSession(from: event)
 
         // Track new session in Mixpanel
@@ -139,6 +165,29 @@ actor SessionStore {
         if let tty = event.tty {
             session.tty = tty.replacingOccurrences(of: "/dev/", with: "")
         }
+        
+        // Update cwd and projectName if provided in the event and valid
+        if event.cwd != "/" && event.cwd != "" {
+            var actualCwd = event.cwd
+            var projectName = URL(fileURLWithPath: event.cwd).lastPathComponent
+            
+            // Try to read title or cwd from Coco's session.json
+            let sessionJsonPath = NSHomeDirectory() + "/Library/Caches/coco/sessions/\(event.sessionId)/session.json"
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: sessionJsonPath)),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let metadata = json["metadata"] as? [String: Any] {
+                if let title = metadata["title"] as? String, !title.isEmpty {
+                    projectName = title
+                } else if let sessionCwd = metadata["cwd"] as? String, !sessionCwd.isEmpty {
+                    actualCwd = sessionCwd
+                    projectName = URL(fileURLWithPath: sessionCwd).lastPathComponent
+                }
+            }
+            
+            session.cwd = actualCwd
+            session.projectName = projectName
+        }
+        
         session.lastActivity = Date()
 
         if event.status == "ended" {
@@ -155,7 +204,9 @@ actor SessionStore {
             Self.logger.debug("Invalid transition: \(String(describing: session.phase), privacy: .public) -> \(String(describing: newPhase), privacy: .public), ignoring")
         }
 
-        if event.event == "PermissionRequest", let toolUseId = event.toolUseId {
+        let normalizedEvent = event.event.lowercased().replacingOccurrences(of: "_", with: "")
+
+        if normalizedEvent == "permissionrequest", let toolUseId = event.toolUseId {
             Self.logger.debug("Setting tool \(toolUseId.prefix(12), privacy: .public) status to waitingForApproval")
             updateToolStatus(in: &session, toolId: toolUseId, status: .waitingForApproval)
         }
@@ -163,7 +214,7 @@ actor SessionStore {
         processToolTracking(event: event, session: &session)
         processSubagentTracking(event: event, session: &session)
 
-        if event.event == "Stop" {
+        if normalizedEvent == "stop" {
             session.subagentState = SubagentState()
         }
 
@@ -173,13 +224,40 @@ actor SessionStore {
         if event.shouldSyncFile {
             scheduleFileSync(sessionId: sessionId, cwd: event.cwd)
         }
+
+        // If this is a remote event with new JSONL lines, cache them locally so
+        // ConversationParser can read them as if the session were local.
+        if let lines = event.remoteJsonlLines, !lines.isEmpty {
+            appendRemoteJsonlLines(lines, sessionId: sessionId, cwd: event.cwd)
+        }
     }
 
     private func createSession(from event: HookEvent) -> SessionState {
-        SessionState(
+        // Find actual project name from file cache if cwd is missing/default
+        var actualCwd = event.cwd
+        var projectName = URL(fileURLWithPath: event.cwd).lastPathComponent
+        
+        // Try to read title or cwd from Coco's session.json
+        let sessionJsonPath = NSHomeDirectory() + "/Library/Caches/coco/sessions/\(event.sessionId)/session.json"
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: sessionJsonPath)),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let metadata = json["metadata"] as? [String: Any] {
+            if let title = metadata["title"] as? String, !title.isEmpty {
+                projectName = title
+            } else if let sessionCwd = metadata["cwd"] as? String, !sessionCwd.isEmpty {
+                actualCwd = sessionCwd
+                projectName = URL(fileURLWithPath: sessionCwd).lastPathComponent
+            }
+        } else if event.cwd == "/" || event.cwd == "" {
+            // Fallback for Claude Code if cwd is missing
+            projectName = "Unknown"
+        }
+        
+        return SessionState(
             sessionId: event.sessionId,
-            cwd: event.cwd,
-            projectName: URL(fileURLWithPath: event.cwd).lastPathComponent,
+            cwd: actualCwd,
+            projectName: projectName,
+            providerId: event.providerId,
             pid: event.pid,
             tty: event.tty?.replacingOccurrences(of: "/dev/", with: ""),
             isInTmux: false,  // Will be updated
@@ -188,8 +266,11 @@ actor SessionStore {
     }
 
     private func processToolTracking(event: HookEvent, session: inout SessionState) {
-        switch event.event {
-        case "PreToolUse":
+        // Normalize event name to support both Claude Code (PreToolUse) and Coco (pre_tool_use)
+        let normalizedEvent = event.event.lowercased().replacingOccurrences(of: "_", with: "")
+
+        switch normalizedEvent {
+        case "pretooluse":
             if let toolUseId = event.toolUseId, let toolName = event.tool {
                 session.toolTracker.startTool(id: toolUseId, name: toolName)
 
@@ -232,7 +313,7 @@ actor SessionStore {
                 }
             }
 
-        case "PostToolUse":
+        case "posttooluse":
             if let toolUseId = event.toolUseId {
                 session.toolTracker.completeTool(id: toolUseId, success: true)
                 // Update chatItem status - tool completed (possibly approved via terminal)
@@ -258,8 +339,11 @@ actor SessionStore {
     }
 
     private func processSubagentTracking(event: HookEvent, session: inout SessionState) {
-        switch event.event {
-        case "PreToolUse":
+        // Normalize event name to support both Claude Code and Coco formats
+        let normalizedEvent = event.event.lowercased().replacingOccurrences(of: "_", with: "")
+
+        switch normalizedEvent {
+        case "pretooluse":
             if ToolCallItem.isSubagentContainerName(event.tool), let toolUseId = event.toolUseId {
                 let description = event.toolInput?["description"]?.value as? String
                 session.subagentState.startTask(taskToolId: toolUseId, description: description)
@@ -293,7 +377,7 @@ actor SessionStore {
                 syncSubagentToolsToChatItems(session: &session)
             }
 
-        case "PostToolUse":
+        case "posttooluse":
             if ToolCallItem.isSubagentContainerName(event.tool), let toolUseId = event.toolUseId {
                 // Agent tool returned — the subagent has finished. Stop
                 // tracking so subsequent tools in the parent turn don't get
@@ -308,7 +392,7 @@ actor SessionStore {
                 syncSubagentToolsToChatItems(session: &session)
             }
 
-        case "SubagentStop":
+        case "subagentstop":
             // SubagentStop fires when a subagent completes - stop tracking
             // Subagent tools are populated from agent file in processFileUpdated
             Self.logger.debug("SubagentStop received")
@@ -1139,5 +1223,41 @@ actor SessionStore {
     /// Get all current sessions
     func allSessions() -> [SessionState] {
         Array(sessions.values)
+    }
+
+    // MARK: - Remote JSONL Caching
+
+    /// Appends raw JSONL lines from a remote hook event to a local cache file,
+    /// then triggers an incremental file sync so the UI gets updated messages.
+    ///
+    /// The cache path mirrors ConversationParser's sessionFilePath logic:
+    ///   <projectsDir>/<escaped-cwd>/<sessionId>.jsonl
+    /// so ConversationParser can find it without any changes.
+    private func appendRemoteJsonlLines(_ lines: [String], sessionId: String, cwd: String) {
+        let projectDir = cwd
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
+        let dir = ClaudePaths.projectsDir.appendingPathComponent(projectDir)
+        let filePath = dir.appendingPathComponent("\(sessionId).jsonl")
+
+        let fm = FileManager.default
+        do {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            let appended = lines.map { $0 + "\n" }.joined()
+            guard let data = appended.data(using: .utf8) else { return }
+            if fm.fileExists(atPath: filePath.path) {
+                let handle = try FileHandle(forWritingTo: filePath)
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            } else {
+                try data.write(to: filePath, options: .atomic)
+            }
+        } catch {
+            Self.logger.error("Failed to cache remote JSONL: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+
+        scheduleFileSync(sessionId: sessionId, cwd: cwd)
     }
 }

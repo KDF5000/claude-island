@@ -12,8 +12,9 @@ import os.log
 /// Logger for hook socket server
 private let logger = Logger(subsystem: "com.claudeisland", category: "Hooks")
 
-/// Event received from Claude Code hooks
+/// Event received from Claude Code or Coco hooks
 struct HookEvent: Codable, Sendable {
+    let providerId: String  // "claude-code" or "coco"
     let sessionId: String
     let cwd: String
     let event: String
@@ -26,17 +27,49 @@ struct HookEvent: Codable, Sendable {
     let notificationType: String?
     let message: String?
 
+    // Coco-specific fields
+    let transcriptPath: String?
+    let agentId: String?
+    let agentType: String?
+
+    /// Raw JSONL lines from the remote transcript, attached by the remote hook script.
+    /// Only present for remote (TCP) events when new lines have been written since the last event.
+    let remoteJsonlLines: [String]?
+
     enum CodingKeys: String, CodingKey {
+        case providerId = "provider_id"
         case sessionId = "session_id"
         case cwd, event, status, pid, tty, tool
         case toolInput = "tool_input"
         case toolUseId = "tool_use_id"
         case notificationType = "notification_type"
         case message
+        case transcriptPath = "transcript_path"
+        case agentId = "agent_id"
+        case agentType = "agent_type"
+        case remoteJsonlLines = "remote_jsonl_lines"
     }
 
     /// Create a copy with updated toolUseId
-    init(sessionId: String, cwd: String, event: String, status: String, pid: Int?, tty: String?, tool: String?, toolInput: [String: AnyCodable]?, toolUseId: String?, notificationType: String?, message: String?) {
+    init(
+        providerId: String = "claude-code",
+        sessionId: String,
+        cwd: String,
+        event: String,
+        status: String,
+        pid: Int?,
+        tty: String?,
+        tool: String?,
+        toolInput: [String: AnyCodable]?,
+        toolUseId: String?,
+        notificationType: String?,
+        message: String?,
+        transcriptPath: String? = nil,
+        agentId: String? = nil,
+        agentType: String? = nil,
+        remoteJsonlLines: [String]? = nil
+    ) {
+        self.providerId = providerId
         self.sessionId = sessionId
         self.cwd = cwd
         self.event = event
@@ -48,10 +81,16 @@ struct HookEvent: Codable, Sendable {
         self.toolUseId = toolUseId
         self.notificationType = notificationType
         self.message = message
+        self.transcriptPath = transcriptPath
+        self.agentId = agentId
+        self.agentType = agentType
+        self.remoteJsonlLines = remoteJsonlLines
     }
 
     var sessionPhase: SessionPhase {
-        if event == "PreCompact" {
+        // Support both Claude Code (PreCompact) and Coco (pre_compact) event names
+        let normalizedEvent = event.lowercased().replacingOccurrences(of: "_", with: "")
+        if normalizedEvent == "precompact" {
             return .compacting
         }
 
@@ -77,8 +116,10 @@ struct HookEvent: Codable, Sendable {
     }
 
     /// Whether this event expects a response (permission request)
+    /// Supports both Claude Code (PermissionRequest) and Coco (permission_request) formats
     nonisolated var expectsResponse: Bool {
-        event == "PermissionRequest" && status == "waiting_for_approval"
+        let normalizedEvent = event.lowercased().replacingOccurrences(of: "_", with: "")
+        return normalizedEvent == "permissionrequest" && status == "waiting_for_approval"
     }
 }
 
@@ -90,6 +131,7 @@ struct HookResponse: Codable {
 
 /// Pending permission request waiting for user decision
 struct PendingPermission: Sendable {
+    let providerId: String
     let sessionId: String
     let toolUseId: String
     let clientSocket: Int32
@@ -105,12 +147,16 @@ typealias PermissionFailureHandler = @Sendable (_ sessionId: String, _ toolUseId
 
 /// Unix domain socket server that receives events from Claude Code hooks
 /// Uses GCD DispatchSource for non-blocking I/O
+/// Supports both Unix socket and TCP (for SSH tunnel support)
 class HookSocketServer {
     static let shared = HookSocketServer()
     static let socketPath = "/tmp/claude-island.sock"
+    static let tcpPort: UInt16 = 19999  // TCP port for SSH tunnel support
 
     private var serverSocket: Int32 = -1
+    private var tcpServerSocket: Int32 = -1
     private var acceptSource: DispatchSourceRead?
+    private var tcpAcceptSource: DispatchSourceRead?
     private var eventHandler: HookEventHandler?
     private var permissionFailureHandler: PermissionFailureHandler?
     private let queue = DispatchQueue(label: "com.claudeisland.socket", qos: .userInitiated)
@@ -127,7 +173,7 @@ class HookSocketServer {
 
     private init() {}
 
-    /// Start the socket server
+    /// Start the socket server (Unix socket + TCP)
     func start(onEvent: @escaping HookEventHandler, onPermissionFailure: PermissionFailureHandler? = nil) {
         queue.async { [weak self] in
             self?.startServer(onEvent: onEvent, onPermissionFailure: onPermissionFailure)
@@ -136,6 +182,7 @@ class HookSocketServer {
 
     private func startServer(onEvent: @escaping HookEventHandler, onPermissionFailure: PermissionFailureHandler?) {
         guard serverSocket < 0 else { return }
+
 
         eventHandler = onEvent
         permissionFailureHandler = onPermissionFailure
@@ -196,6 +243,84 @@ class HookSocketServer {
             }
         }
         acceptSource?.resume()
+
+        // Also start TCP server for SSH tunnel support
+        startTCPServer()
+    }
+
+    /// Start TCP socket server for SSH tunnel connections
+    private func startTCPServer() {
+        guard tcpServerSocket < 0 else { return }
+
+        tcpServerSocket = socket(AF_INET, SOCK_STREAM, 0)
+        guard tcpServerSocket >= 0 else {
+            logger.error("Failed to create TCP socket: \(errno)")
+            return
+        }
+
+        let flags = fcntl(tcpServerSocket, F_GETFL)
+        _ = fcntl(tcpServerSocket, F_SETFL, flags | O_NONBLOCK)
+
+        var opt: Int32 = 1
+        setsockopt(tcpServerSocket, SOL_SOCKET, SO_REUSEADDR, &opt, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = Self.tcpPort.bigEndian
+        addr.sin_addr.s_addr = INADDR_LOOPBACK.bigEndian
+
+        let bindResult = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.bind(tcpServerSocket, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+
+        guard bindResult == 0 else {
+            logger.error("Failed to bind TCP socket: \(errno)")
+            close(tcpServerSocket)
+            tcpServerSocket = -1
+            return
+        }
+
+        guard listen(tcpServerSocket, 10) == 0 else {
+            logger.error("Failed to listen on TCP: \(errno)")
+            close(tcpServerSocket)
+            tcpServerSocket = -1
+            return
+        }
+
+        logger.info("TCP server listening on port \(Self.tcpPort, privacy: .public) (for SSH tunnels)")
+
+        tcpAcceptSource = DispatchSource.makeReadSource(fileDescriptor: tcpServerSocket, queue: queue)
+        tcpAcceptSource?.setEventHandler { [weak self] in
+            self?.acceptTCPConnection()
+        }
+        tcpAcceptSource?.setCancelHandler { [weak self] in
+            if let fd = self?.tcpServerSocket, fd >= 0 {
+                close(fd)
+                self?.tcpServerSocket = -1
+            }
+        }
+        tcpAcceptSource?.resume()
+    }
+
+    /// Accept a TCP connection (from SSH tunnel)
+    private func acceptTCPConnection() {
+        var addr = sockaddr_in()
+        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let clientSocket = withUnsafeMutablePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
+                Darwin.accept(tcpServerSocket, sockaddrPtr, &addrLen)
+            }
+        }
+
+        guard clientSocket >= 0 else { return }
+
+        var nosigpipe: Int32 = 1
+        setsockopt(clientSocket, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
+
+        logger.debug("Accepted TCP connection (SSH tunnel)")
+        handleClient(clientSocket, isRemote: true)
     }
 
     /// Stop the socket server
@@ -203,6 +328,9 @@ class HookSocketServer {
         acceptSource?.cancel()
         acceptSource = nil
         unlink(Self.socketPath)
+
+        tcpAcceptSource?.cancel()
+        tcpAcceptSource = nil
 
         permissionsLock.lock()
         for (_, pending) in pendingPermissions {
@@ -364,10 +492,15 @@ class HookSocketServer {
         var nosigpipe: Int32 = 1
         setsockopt(clientSocket, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
 
-        handleClient(clientSocket)
+        handleClient(clientSocket, isRemote: false)
     }
 
-    private func handleClient(_ clientSocket: Int32) {
+    /// Read and process a single hook event.
+    ///
+    /// Note: TCP connections are used for SSH tunnels, so their `pid`/`tty` refer to the
+    /// remote machine. We intentionally drop `pid` for these events so SessionStore's
+    /// local process-liveness checks don't immediately evict the session.
+    private func handleClient(_ clientSocket: Int32, isRemote: Bool) {
         let flags = fcntl(clientSocket, F_GETFL)
         _ = fcntl(clientSocket, F_SETFL, flags | O_NONBLOCK)
 
@@ -405,19 +538,45 @@ class HookSocketServer {
 
         let data = allData
 
-        guard let event = try? JSONDecoder().decode(HookEvent.self, from: data) else {
+        guard let decoded = try? JSONDecoder().decode(HookEvent.self, from: data) else {
             logger.warning("Failed to parse event: \(String(data: data, encoding: .utf8) ?? "?", privacy: .public)")
             close(clientSocket)
             return
         }
 
+        // Normalize remote events so they behave correctly on the local host.
+        let event: HookEvent = {
+            guard isRemote else { return decoded }
+            return HookEvent(
+                providerId: decoded.providerId,
+                sessionId: decoded.sessionId,
+                cwd: decoded.cwd,
+                event: decoded.event,
+                status: decoded.status,
+                pid: nil, // Remote PID is meaningless on this host
+                tty: decoded.tty,
+                tool: decoded.tool,
+                toolInput: decoded.toolInput,
+                toolUseId: decoded.toolUseId,
+                notificationType: decoded.notificationType,
+                message: decoded.message,
+                transcriptPath: decoded.transcriptPath,
+                agentId: decoded.agentId,
+                agentType: decoded.agentType,
+                remoteJsonlLines: decoded.remoteJsonlLines
+            )
+        }()
+
+
+        let normalizedEvent = event.event.lowercased().replacingOccurrences(of: "_", with: "")
+
         logger.debug("Received: \(event.event, privacy: .public) for \(event.sessionId.prefix(8), privacy: .public)")
 
-        if event.event == "PreToolUse" {
+        if normalizedEvent == "pretooluse" {
             cacheToolUseId(event: event)
         }
 
-        if event.event == "SessionEnd" {
+        if normalizedEvent == "sessionend" {
             cleanupCache(sessionId: event.sessionId)
         }
 
@@ -437,6 +596,7 @@ class HookSocketServer {
             logger.debug("Permission request - keeping socket open for \(event.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public)")
 
             let updatedEvent = HookEvent(
+                providerId: event.providerId,
                 sessionId: event.sessionId,
                 cwd: event.cwd,
                 event: event.event,
@@ -447,10 +607,14 @@ class HookSocketServer {
                 toolInput: event.toolInput,
                 toolUseId: toolUseId,  // Use resolved toolUseId
                 notificationType: event.notificationType,
-                message: event.message
+                message: event.message,
+                transcriptPath: event.transcriptPath,
+                agentId: event.agentId,
+                agentType: event.agentType
             )
 
             let pending = PendingPermission(
+                providerId: event.providerId,
                 sessionId: event.sessionId,
                 toolUseId: toolUseId,
                 clientSocket: clientSocket,
