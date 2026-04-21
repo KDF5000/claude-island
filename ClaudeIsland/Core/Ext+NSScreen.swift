@@ -8,14 +8,19 @@
 import AppKit
 
 extension NSScreen {
+    /// Best-effort menu bar height for this screen.
+    /// Uses `frame` vs `visibleFrame` delta, falling back to system thickness.
+    var menuBarHeight: CGFloat {
+        let computed = max(0, frame.maxY - visibleFrame.maxY)
+        if computed > 0 { return computed }
+        return NSStatusBar.system.thickness
+    }
+
     /// Returns the size of the notch on this screen (pixel-perfect using macOS APIs)
     var notchSize: CGSize {
-        guard safeAreaInsets.top > 0 else {
-            // Fallback for non-notch displays (matches typical MacBook notch)
-            return CGSize(width: 224, height: 38)
-        }
-
-        let notchHeight = safeAreaInsets.top
+        // On non-notch displays `safeAreaInsets.top` is often 0, but the menu bar still exists.
+        // Use the menu bar height so the "notch" never exceeds the menu bar when on an external display.
+        let notchHeight = safeAreaInsets.top > 0 ? safeAreaInsets.top : menuBarHeight
         let fullWidth = frame.width
         let leftPadding = auxiliaryTopLeftArea?.width ?? 0
         let rightPadding = auxiliaryTopRightArea?.width ?? 0
