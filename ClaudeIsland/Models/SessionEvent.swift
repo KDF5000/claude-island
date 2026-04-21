@@ -136,14 +136,21 @@ extension HookEvent {
             return .compacting
         }
 
-        // Permission request creates waitingForApproval state
-        if expectsResponse, let tool = tool {
-            return .waitingForApproval(PermissionContext(
-                toolUseId: toolUseId ?? "",
-                toolName: tool,
-                toolInput: toolInput,
-                receivedAt: Date()
-            ))
+        // Permission request creates waitingForApproval state.
+        // Guard against missing toolUseId (cache miss) — in that case the socket has
+        // already been closed and there's nothing actionable to approve/deny.
+        if expectsResponse {
+            if let tool = tool, let resolvedToolUseId = toolUseId, !resolvedToolUseId.isEmpty {
+                return .waitingForApproval(PermissionContext(
+                    toolUseId: resolvedToolUseId,
+                    toolName: tool,
+                    toolInput: toolInput,
+                    receivedAt: Date()
+                ))
+            }
+
+            // Avoid getting stuck showing a perpetual permission indicator.
+            return .idle
         }
 
         if normalizedEvent == "notification" && notificationType == "idle_prompt" {

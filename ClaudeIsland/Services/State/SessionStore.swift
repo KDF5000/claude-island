@@ -1186,8 +1186,11 @@ actor SessionStore {
     /// Recheck status of all active sessions
     private func recheckAllSessions() {
         var removedSession = false
+        var mutatedSession = false
 
-        for (sessionId, session) in Array(sessions) {
+        for (sessionId, existing) in Array(sessions) {
+            var session = existing
+
             if session.phase == .ended {
                 sessions.removeValue(forKey: sessionId)
                 cancelPendingSync(sessionId: sessionId)
@@ -1206,6 +1209,28 @@ actor SessionStore {
                 }
             }
 
+            // Heal stale permission state.
+            // This can happen when a PermissionRequest arrives without a resolvable tool_use_id
+            // (cache miss) — the socket is closed in HookSocketServer, but the UI could remain
+            // stuck in .waitingForApproval forever.
+            if session.phase.isWaitingForApproval && !HookSocketServer.shared.hasPendingPermission(sessionId: sessionId) {
+                let hasRunningTool = session.chatItems.contains { item in
+                    guard case .toolCall(let tool) = item.type else { return false }
+                    return tool.status == .running
+                }
+                let hasWaitingTool = session.chatItems.contains { item in
+                    guard case .toolCall(let tool) = item.type else { return false }
+                    return tool.status == .waitingForApproval
+                }
+
+                let targetPhase: SessionPhase = (hasRunningTool || hasWaitingTool) ? .processing : .idle
+                if session.phase.canTransition(to: targetPhase) {
+                    session.phase = targetPhase
+                    sessions[sessionId] = session
+                    mutatedSession = true
+                }
+            }
+
             let needsSync: Bool
             switch session.phase {
             case .processing, .waitingForApproval:
@@ -1218,7 +1243,7 @@ actor SessionStore {
             }
         }
 
-        if removedSession {
+        if removedSession || mutatedSession {
             publishState()
         }
     }
