@@ -93,10 +93,20 @@ class ClaudeSessionMonitor: ObservableObject {
                 return
             }
 
-            HookSocketServer.shared.respondToPermission(
-                toolUseId: permission.toolUseId,
-                decision: "allow"
-            )
+            // Check if the hook socket is still alive (fast path)
+            let hasSocket = HookSocketServer.shared.hasPendingPermission(sessionId: sessionId)
+
+            if hasSocket {
+                // Fast path: hook is still waiting, respond via socket
+                HookSocketServer.shared.respondToPermission(
+                    toolUseId: permission.toolUseId,
+                    decision: "allow"
+                )
+            } else {
+                // Fallback: hook already timed out, CLI is showing its own UI.
+                // Send approval keystrokes to the terminal.
+                await sendApprovalToTerminal(session: session, approve: true)
+            }
 
             await SessionStore.shared.process(
                 .permissionApproved(sessionId: sessionId, toolUseId: permission.toolUseId)
@@ -111,16 +121,96 @@ class ClaudeSessionMonitor: ObservableObject {
                 return
             }
 
-            HookSocketServer.shared.respondToPermission(
-                toolUseId: permission.toolUseId,
-                decision: "deny",
-                reason: reason
-            )
+            let hasSocket = HookSocketServer.shared.hasPendingPermission(sessionId: sessionId)
+
+            if hasSocket {
+                HookSocketServer.shared.respondToPermission(
+                    toolUseId: permission.toolUseId,
+                    decision: "deny",
+                    reason: reason
+                )
+            } else {
+                await sendApprovalToTerminal(session: session, approve: false)
+            }
 
             await SessionStore.shared.process(
                 .permissionDenied(sessionId: sessionId, toolUseId: permission.toolUseId, reason: reason)
             )
         }
+    }
+
+    // MARK: - Terminal Keystroke Injection
+
+    /// Send approval/denial keystrokes to the terminal when the hook socket is no longer available.
+    private func sendApprovalToTerminal(session: SessionState, approve: Bool) async {
+        if session.isInTmux, let tty = session.tty {
+            // tmux session: use ToolApprovalHandler (tmux send-keys)
+            if let target = await findTmuxTarget(tty: tty) {
+                if approve {
+                    _ = await ToolApprovalHandler.shared.approveOnce(target: target)
+                } else {
+                    _ = await ToolApprovalHandler.shared.reject(target: target)
+                }
+            }
+        } else if let pid = session.pid {
+            // Non-tmux session: focus terminal + AppleScript keystrokes
+            _ = await YabaiController.shared.focusWindow(forClaudePid: pid)
+            try? await Task.sleep(for: .milliseconds(100))
+            let key = approve ? "1" : "n"
+            await sendKeystrokesViaAppleScript(keys: [key, "Return"])
+        }
+    }
+
+    /// Send keystrokes via AppleScript (System Events)
+    private func sendKeystrokesViaAppleScript(keys: [String]) async {
+        let keystrokeLines = keys.map { key in
+            if key == "Return" {
+                return "key code 36"
+            } else {
+                return "keystroke \"\(key)\""
+            }
+        }.joined(separator: "\n    delay 0.05\n    ")
+
+        let script = """
+        tell application "System Events"
+            \(keystrokeLines)
+        end tell
+        """
+
+        _ = try? await ProcessExecutor.shared.run(
+            "/usr/bin/osascript", arguments: ["-e", script]
+        )
+    }
+
+    /// Find the tmux target for a given TTY
+    private func findTmuxTarget(tty: String) async -> TmuxTarget? {
+        guard let tmuxPath = await TmuxPathFinder.shared.getTmuxPath() else {
+            return nil
+        }
+
+        do {
+            let output = try await ProcessExecutor.shared.run(
+                tmuxPath,
+                arguments: ["list-panes", "-a", "-F", "#{session_name}:#{window_index}.#{pane_index} #{pane_tty}"]
+            )
+
+            let lines = output.components(separatedBy: "\n")
+            for line in lines {
+                let parts = line.components(separatedBy: " ")
+                guard parts.count >= 2 else { continue }
+
+                let target = parts[0]
+                let paneTty = parts[1].replacingOccurrences(of: "/dev/", with: "")
+
+                if paneTty == tty {
+                    return TmuxTarget(from: target)
+                }
+            }
+        } catch {
+            return nil
+        }
+
+        return nil
     }
 
     /// Archive (remove) a session from the instances list

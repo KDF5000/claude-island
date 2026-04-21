@@ -39,6 +39,9 @@ struct HookEvent: Codable, Sendable {
     /// Path resolution debug info from the remote hook script (for diagnosing missing JSONL).
     let remotePathDebug: [String]?
 
+    /// Whether the hook uses dual-approval mode (short timeout, CLI shows its own UI)
+    let dualApprovalMode: Bool?
+
     enum CodingKeys: String, CodingKey {
         case providerId = "provider_id"
         case sessionId = "session_id"
@@ -52,6 +55,7 @@ struct HookEvent: Codable, Sendable {
         case agentType = "agent_type"
         case remoteJsonlLines = "remote_jsonl_lines"
         case remotePathDebug = "remote_path_debug"
+        case dualApprovalMode = "dual_approval_mode"
     }
 
     /// Create a copy with updated toolUseId
@@ -72,7 +76,8 @@ struct HookEvent: Codable, Sendable {
         agentId: String? = nil,
         agentType: String? = nil,
         remoteJsonlLines: [String]? = nil,
-        remotePathDebug: [String]? = nil
+        remotePathDebug: [String]? = nil,
+        dualApprovalMode: Bool? = nil
     ) {
         self.providerId = providerId
         self.sessionId = sessionId
@@ -91,6 +96,7 @@ struct HookEvent: Codable, Sendable {
         self.agentType = agentType
         self.remoteJsonlLines = remoteJsonlLines
         self.remotePathDebug = remotePathDebug
+        self.dualApprovalMode = dualApprovalMode
     }
 
     var sessionPhase: SessionPhase {
@@ -143,6 +149,7 @@ struct PendingPermission: Sendable {
     let clientSocket: Int32
     let event: HookEvent
     let receivedAt: Date
+    let dualApprovalMode: Bool
 }
 
 /// Callback for hook events
@@ -170,6 +177,9 @@ class HookSocketServer {
     /// Pending permission requests indexed by toolUseId
     private var pendingPermissions: [String: PendingPermission] = [:]
     private let permissionsLock = NSLock()
+
+    /// Dispatch sources to detect when hooks close their sockets (after dual-approval timeout)
+    private var socketMonitors: [String: DispatchSourceRead] = [:]
 
     /// Cache tool_use_id from PreToolUse to correlate with PermissionRequest
     /// Key: "sessionId:toolName:serializedInput" -> Queue of tool_use_ids (FIFO)
@@ -341,6 +351,11 @@ class HookSocketServer {
         tcpAcceptSource?.cancel()
         tcpAcceptSource = nil
 
+        for (_, monitor) in socketMonitors {
+            monitor.cancel()
+        }
+        socketMonitors.removeAll()
+
         permissionsLock.lock()
         for (_, pending) in pendingPermissions {
             close(pending.clientSocket)
@@ -350,10 +365,47 @@ class HookSocketServer {
     }
 
     /// Respond to a pending permission request by toolUseId
-    func respondToPermission(toolUseId: String, decision: String, reason: String? = nil) {
-        queue.async { [weak self] in
-            self?.sendPermissionResponse(toolUseId: toolUseId, decision: decision, reason: reason)
+    /// Returns true if the socket response was sent successfully, false if socket was already closed
+    @discardableResult
+    func respondToPermission(toolUseId: String, decision: String, reason: String? = nil) -> Bool {
+        permissionsLock.lock()
+        guard let pending = pendingPermissions.removeValue(forKey: toolUseId) else {
+            permissionsLock.unlock()
+            logger.debug("No pending permission for toolUseId: \(toolUseId.prefix(12), privacy: .public)")
+            return false
         }
+        permissionsLock.unlock()
+
+        // Cancel the socket monitor if one exists
+        socketMonitors[toolUseId]?.cancel()
+        socketMonitors.removeValue(forKey: toolUseId)
+
+        let response = HookResponse(decision: decision, reason: reason)
+        guard let data = try? JSONEncoder().encode(response) else {
+            close(pending.clientSocket)
+            return false
+        }
+
+        let age = Date().timeIntervalSince(pending.receivedAt)
+        logger.info("Sending response: \(decision, privacy: .public) for \(pending.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
+
+        var writeOk = false
+        data.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else {
+                logger.error("Failed to get data buffer address")
+                return
+            }
+            let result = write(pending.clientSocket, baseAddress, data.count)
+            if result < 0 {
+                logger.error("Write failed with errno: \(errno)")
+            } else {
+                logger.debug("Write succeeded: \(result) bytes")
+                writeOk = true
+            }
+        }
+
+        close(pending.clientSocket)
+        return writeOk
     }
 
     /// Respond to permission by sessionId (finds the most recent pending for that session)
@@ -403,6 +455,21 @@ class HookSocketServer {
         permissionsLock.unlock()
 
         logger.debug("Tool completed externally, closing socket for \(pending.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public)")
+        close(pending.clientSocket)
+    }
+
+    /// Clean up a pending permission whose socket was closed by the hook (dual-approval timeout)
+    private func cleanupDeadPermission(toolUseId: String) {
+        socketMonitors.removeValue(forKey: toolUseId)
+
+        permissionsLock.lock()
+        guard let pending = pendingPermissions.removeValue(forKey: toolUseId) else {
+            permissionsLock.unlock()
+            return
+        }
+        permissionsLock.unlock()
+
+        logger.debug("Hook socket closed (dual-approval timeout), cleaning up \(pending.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public)")
         close(pending.clientSocket)
     }
 
@@ -571,7 +638,8 @@ class HookSocketServer {
                 agentId: decoded.agentId,
                 agentType: decoded.agentType,
                 remoteJsonlLines: decoded.remoteJsonlLines,
-                remotePathDebug: decoded.remotePathDebug
+                remotePathDebug: decoded.remotePathDebug,
+                dualApprovalMode: decoded.dualApprovalMode
             )
         }()
 
@@ -620,8 +688,11 @@ class HookSocketServer {
                 agentId: event.agentId,
                 agentType: event.agentType,
                 remoteJsonlLines: event.remoteJsonlLines,
-                remotePathDebug: event.remotePathDebug
+                remotePathDebug: event.remotePathDebug,
+                dualApprovalMode: event.dualApprovalMode
             )
+
+            let isDualApproval = event.dualApprovalMode ?? false
 
             let pending = PendingPermission(
                 providerId: event.providerId,
@@ -629,11 +700,24 @@ class HookSocketServer {
                 toolUseId: toolUseId,
                 clientSocket: clientSocket,
                 event: updatedEvent,
-                receivedAt: Date()
+                receivedAt: Date(),
+                dualApprovalMode: isDualApproval
             )
             permissionsLock.lock()
             pendingPermissions[toolUseId] = pending
             permissionsLock.unlock()
+
+            // In dual-approval mode, the hook will close its socket after 3 seconds.
+            // Monitor for EOF so we can clean up the dead pending permission.
+            if isDualApproval {
+                let monitor = DispatchSource.makeReadSource(fileDescriptor: clientSocket, queue: queue)
+                monitor.setEventHandler { [weak self] in
+                    self?.cleanupDeadPermission(toolUseId: toolUseId)
+                    monitor.cancel()
+                }
+                monitor.resume()
+                socketMonitors[toolUseId] = monitor
+            }
 
             eventHandler?(updatedEvent)
             return
@@ -642,40 +726,6 @@ class HookSocketServer {
         }
 
         eventHandler?(event)
-    }
-
-    private func sendPermissionResponse(toolUseId: String, decision: String, reason: String?) {
-        permissionsLock.lock()
-        guard let pending = pendingPermissions.removeValue(forKey: toolUseId) else {
-            permissionsLock.unlock()
-            logger.debug("No pending permission for toolUseId: \(toolUseId.prefix(12), privacy: .public)")
-            return
-        }
-        permissionsLock.unlock()
-
-        let response = HookResponse(decision: decision, reason: reason)
-        guard let data = try? JSONEncoder().encode(response) else {
-            close(pending.clientSocket)
-            return
-        }
-
-        let age = Date().timeIntervalSince(pending.receivedAt)
-        logger.info("Sending response: \(decision, privacy: .public) for \(pending.sessionId.prefix(8), privacy: .public) tool:\(toolUseId.prefix(12), privacy: .public) (age: \(String(format: "%.1f", age), privacy: .public)s)")
-
-        data.withUnsafeBytes { bytes in
-            guard let baseAddress = bytes.baseAddress else {
-                logger.error("Failed to get data buffer address")
-                return
-            }
-            let result = write(pending.clientSocket, baseAddress, data.count)
-            if result < 0 {
-                logger.error("Write failed with errno: \(errno)")
-            } else {
-                logger.debug("Write succeeded: \(result) bytes")
-            }
-        }
-
-        close(pending.clientSocket)
     }
 
     private func sendPermissionResponseBySession(sessionId: String, decision: String, reason: String?) {

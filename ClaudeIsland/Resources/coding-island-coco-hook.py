@@ -16,7 +16,9 @@ import time
 SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
 # Overall budget for waiting on a permission decision from CodingIsland.
 # Note: Coco's hook config must have a timeout >= this value.
-TIMEOUT_SECONDS = 300  # 5 minutes
+TIMEOUT_SECONDS = 300  # 5 minutes (non-permission events)
+DUAL_APPROVAL_TIMEOUT = 3  # Short wait for fast Coding Island approval;
+                           # after timeout, CLI shows its own permission UI
 PROVIDER_ID = "coco"
 
 
@@ -127,9 +129,10 @@ def _resolve_transcript_path(session_id, transcript_path):
 def send_event(state, wait_for_response=False, transcript_path=None):
     """Send event to app, return response if any.
 
-    For permission requests we can optionally wait for a response from Island.
-    While waiting, if we detect the transcript file has advanced (likely the user
-    approved/denied in the CLI), we stop waiting so we don't block follow-up hooks.
+    For permission requests (wait_for_response=True), uses a short timeout
+    (DUAL_APPROVAL_TIMEOUT) so the CLI can show its own permission UI
+    concurrently. If the app responds within the timeout, the decision
+    is returned; otherwise None is returned and the hook exits silently.
     """
     sock = None
     try:
@@ -145,14 +148,16 @@ def send_event(state, wait_for_response=False, transcript_path=None):
                 pass
             return None
 
-        # Remove mtime check to prevent the hook from exiting prematurely
-        # when Coco logs the permission request event.
+        # Wait for response with short timeout (dual-approval mode)
         try:
-            sock.settimeout(TIMEOUT_SECONDS)
+            sock.settimeout(DUAL_APPROVAL_TIMEOUT)
             response = sock.recv(4096)
             if response:
                 return json.loads(response.decode())
-        except (socket.timeout, json.JSONDecodeError, OSError):
+        except socket.timeout:
+            # Dual-approval mode: timeout reached, CLI will show its own UI
+            return None
+        except (json.JSONDecodeError, OSError):
             pass
 
         return None
@@ -295,8 +300,9 @@ def main():
         # === Critical: Permission request handling ===
         state["status"] = "waiting_for_approval"
         state["tool_use_id"] = data.get("tool_use_id") or f"{session_id}:{tool_name}"
+        state["dual_approval_mode"] = True
 
-        # Send to app and wait for decision
+        # Send to app and wait for decision (short timeout)
         response = send_event(state, wait_for_response=True, transcript_path=resolved_transcript_path)
 
         if response:
@@ -326,7 +332,14 @@ def main():
                 print(json.dumps(output))
                 sys.exit(0)
 
-        # No response or "ask" - let Coco show its normal UI
+        # No response (timeout) — output "ask" so CLI shows its own permission UI
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "decision": {"behavior": "ask"}
+            }
+        }
+        print(json.dumps(output))
         sys.exit(0)
 
     else:

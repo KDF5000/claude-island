@@ -10,7 +10,9 @@ import socket
 import sys
 
 SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
-TIMEOUT_SECONDS = 300  # 5 minutes for permission decisions
+TIMEOUT_SECONDS = 300  # 5 minutes (non-permission events)
+DUAL_APPROVAL_TIMEOUT = 3  # Short wait for fast Coding Island approval;
+                           # after timeout, CLI shows its own permission UI
 
 
 def get_tty():
@@ -50,19 +52,31 @@ def get_tty():
 
 
 def send_event(state):
-    """Send event to app, return response if any"""
+    """Send event to app, return response if any.
+
+    For permission requests (waiting_for_approval), uses a short timeout
+    (DUAL_APPROVAL_TIMEOUT) so the CLI can show its own permission UI
+    concurrently. If the app responds within the timeout, the decision
+    is returned; otherwise None is returned and the hook exits silently.
+    """
     try:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(TIMEOUT_SECONDS)
+        is_approval = state.get("status") == "waiting_for_approval"
+        sock.settimeout(DUAL_APPROVAL_TIMEOUT if is_approval else TIMEOUT_SECONDS)
         sock.connect(SOCKET_PATH)
         sock.sendall(json.dumps(state).encode())
 
-        # For permission requests, wait for response
-        if state.get("status") == "waiting_for_approval":
-            response = sock.recv(4096)
-            sock.close()
-            if response:
-                return json.loads(response.decode())
+        # For permission requests, wait for response (short timeout)
+        if is_approval:
+            try:
+                response = sock.recv(4096)
+                sock.close()
+                if response:
+                    return json.loads(response.decode())
+            except socket.timeout:
+                # Dual-approval mode: timeout reached, CLI will show its own UI
+                sock.close()
+                return None
         else:
             sock.close()
 
@@ -141,9 +155,10 @@ def main():
         state["status"] = "waiting_for_approval"
         state["tool"] = data.get("tool_name")
         state["tool_input"] = tool_input
+        state["dual_approval_mode"] = True
         # tool_use_id lookup handled by Swift-side cache from PreToolUse
 
-        # Send to app and wait for decision
+        # Send to app and wait for decision (short timeout)
         response = send_event(state)
 
         if response:
@@ -175,7 +190,14 @@ def main():
                 print(json.dumps(output))
                 sys.exit(0)
 
-        # No response or "ask" - let Claude Code show its normal UI
+        # No response (timeout) — output "ask" so CLI shows its own permission UI
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "ask"},
+            }
+        }
+        print(json.dumps(output))
         sys.exit(0)
 
     elif event == "Notification":
