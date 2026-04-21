@@ -219,13 +219,13 @@ actor SessionStore {
 
         let normalizedEvent = event.event.lowercased().replacingOccurrences(of: "_", with: "")
 
+        processToolTracking(event: event, session: &session)
+        processSubagentTracking(event: event, session: &session)
+
         if normalizedEvent == "permissionrequest", let toolUseId = event.toolUseId {
             Self.logger.debug("Setting tool \(toolUseId.prefix(12), privacy: .public) status to waitingForApproval")
             updateToolStatus(in: &session, toolId: toolUseId, status: .waitingForApproval)
         }
-
-        processToolTracking(event: event, session: &session)
-        processSubagentTracking(event: event, session: &session)
 
         if normalizedEvent == "stop" {
             session.subagentState = SubagentState()
@@ -276,9 +276,9 @@ actor SessionStore {
     private func processToolTracking(event: HookEvent, session: inout SessionState) {
         // Normalize event name to support both Claude Code (PreToolUse) and Coco (pre_tool_use)
         let normalizedEvent = event.event.lowercased().replacingOccurrences(of: "_", with: "")
-
+        
         switch normalizedEvent {
-        case "pretooluse":
+        case "pretooluse", "permissionrequest":
             if let toolUseId = event.toolUseId, let toolName = event.tool {
                 session.toolTracker.startTool(id: toolUseId, name: toolName)
 
@@ -286,11 +286,11 @@ actor SessionStore {
                 // They'll appear under their parent Task instead
                 let isSubagentTool = session.subagentState.hasActiveSubagent && !ToolCallItem.isSubagentContainerName(toolName)
                 if isSubagentTool {
-                    return
+                                        return
                 }
 
                 let toolExists = session.chatItems.contains { $0.id == toolUseId }
-                if !toolExists {
+                                if !toolExists {
                     var input: [String: String] = [:]
                     if let hookInput = event.toolInput {
                         for (key, value) in hookInput {
@@ -304,12 +304,14 @@ actor SessionStore {
                         }
                     }
 
+                    let initialStatus: ToolStatus = normalizedEvent == "permissionrequest" ? .waitingForApproval : .running
+
                     let placeholderItem = ChatHistoryItem(
                         id: toolUseId,
                         type: .toolCall(ToolCallItem(
                             name: toolName,
                             input: input,
-                            status: .running,
+                            status: initialStatus,
                             result: nil,
                             structuredResult: nil,
                             subagentTools: []
