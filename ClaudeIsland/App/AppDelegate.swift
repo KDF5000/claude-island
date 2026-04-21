@@ -240,9 +240,14 @@ final class SettingsWindowController: NSWindowController {
         let hosting = NSHostingController(rootView: root)
 
         let window = NSWindow(contentViewController: hosting)
-        window.title = "Settings"
+        // Match macOS Settings: no title text, content extends into titlebar,
+        // and traffic lights sit over the sidebar area.
+        window.title = ""
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.titleVisibility = .visible
+        window.styleMask.insert(.fullSizeContentView)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isMovableByWindowBackground = true
         window.setContentSize(NSSize(width: 860, height: 560))
         window.minSize = NSSize(width: 760, height: 520)
         window.isReleasedWhenClosed = false
@@ -319,27 +324,96 @@ private struct SettingsWindowRootView: View {
     @ObservedObject private var sshTunnelManager = SSHTunnelManager.shared
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                ForEach(SettingsSection.allCases) { section in
-                    SettingsSidebarRow(
-                        section: section,
-                        isSelected: model.selection == section
-                    ) {
-                        model.selection = section
-                    }
-                }
+        ZStack {
+            // Content layer background. Keep Liquid Glass/material effects reserved
+            // for the navigation layer (sidebar) instead of the entire window.
+            Rectangle().fill(SettingsStyle.pageBackground)
+
+            HStack(spacing: 0) {
+                SettingsSidebarView(selection: $model.selection)
+                    .frame(width: SettingsStyle.sidebarWidth)
+                    // Sidebar acts as the navigation layer.
+                    .background(.regularMaterial)
+                    // Prefer depth cues (shadow) over a hard divider line.
+                    .compositingGroup()
+                    .shadow(color: Color.black.opacity(0.10), radius: 10, x: 4, y: 0)
+
+                SettingsDetailView(
+                    selection: model.selection,
+                    updateManager: updateManager,
+                    screenSelector: screenSelector,
+                    sshTunnelManager: sshTunnelManager
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // Content stays in the content layer and inherits the page background.
+                .background(Color.clear)
             }
-            .listStyle(.sidebar)
-        } detail: {
-            SettingsDetailView(
-                selection: model.selection,
-                updateManager: updateManager,
-                screenSelector: screenSelector,
-                sshTunnelManager: sshTunnelManager
-            )
         }
         .frame(minWidth: 760, minHeight: 520)
+    }
+}
+
+private struct SettingsSidebarView: View {
+    @Binding var selection: SettingsSection?
+
+    private var generalSections: [SettingsSection] {
+        [.appearance, .notifications, .paths, .remote, .system]
+    }
+
+    private var infoSections: [SettingsSection] {
+        [.about]
+    }
+
+    var body: some View {
+        ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 10) {
+                // Leave room for the traffic lights when using fullSizeContentView.
+                Spacer().frame(height: SettingsStyle.titlebarContentInset)
+
+                SettingsSidebarSectionHeader(title: "General")
+                VStack(spacing: 6) {
+                    ForEach(generalSections) { section in
+                        SettingsSidebarRow(
+                            section: section,
+                            isSelected: selection == section
+                        ) {
+                            selection = section
+                        }
+                    }
+                }
+
+                Spacer().frame(height: 10)
+
+                SettingsSidebarSectionHeader(title: "Info")
+                VStack(spacing: 6) {
+                    ForEach(infoSections) { section in
+                        SettingsSidebarRow(
+                            section: section,
+                            isSelected: selection == section
+                        ) {
+                            selection = section
+                        }
+                    }
+                }
+
+                Spacer(minLength: 16)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+        }
+        .scrollIndicators(.hidden)
+    }
+}
+
+private struct SettingsSidebarSectionHeader: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+            .padding(.top, 4)
     }
 }
 
@@ -350,19 +424,48 @@ private struct SettingsSidebarRow: View {
 
     var body: some View {
         Button(action: action) {
-            Label(section.title, systemImage: section.systemImage)
-                .foregroundStyle(isSelected ? AnyShapeStyle(.primary) : AnyShapeStyle(.secondary))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 6)
-                .contentShape(Rectangle())
+            HStack(spacing: 10) {
+                Image(systemName: section.systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(width: 18)
+
+                Text(section.title)
+                    .font(.system(size: 13, weight: .semibold))
+
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(isSelected ? AnyShapeStyle(Color.white) : AnyShapeStyle(.primary))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(isSelected ? SettingsStyle.sidebarSelection : Color.clear)
+            )
         }
         .buttonStyle(.plain)
-        .listRowInsets(EdgeInsets(top: 6, leading: 10, bottom: 6, trailing: 10))
-        .listRowBackground(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(isSelected ? Color.accentColor.opacity(0.18) : Color.clear)
-        )
     }
+}
+
+private enum SettingsStyle {
+    static let sidebarWidth: CGFloat = 210
+    // Keep room for traffic lights, but avoid a large empty band.
+    static let titlebarContentInset: CGFloat = 8
+    // Right content doesn't need to align with sidebar items; keep a small, consistent
+    // top inset from the window frame instead.
+    static let contentTopInset: CGFloat = 12
+    static let contentMaxWidth: CGFloat = 820
+
+    // Mimic the reference: sidebar slightly darker than the content area.
+    static let sidebarBackground = Color(nsColor: .controlBackgroundColor)
+    // Match window background so the right side doesn't look like a separate slab.
+    static let pageBackground = Color(nsColor: .controlBackgroundColor)
+
+    // Selection pill.
+    static let sidebarSelection = Color(nsColor: .systemBlue)
+
+    // Cards.
+    static let cardBackground = Color(nsColor: .windowBackgroundColor)
+    static let cardBorder = Color(nsColor: .separatorColor).opacity(0.45)
 }
 
 private struct SettingsDetailView: View {
@@ -415,15 +518,92 @@ private struct SettingsPage<Content: View>: View {
 
     var body: some View {
         ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 14) {
                 Text(title)
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(.system(size: 26, weight: .bold))
 
                 content
             }
-            .padding(20)
-            .frame(maxWidth: 760, alignment: .topLeading)
+            // With fullSizeContentView, content can extend under the titlebar.
+            // Add top inset so the first title doesn't clash with the window chrome.
+            .padding(.horizontal, 18)
+            .padding(.bottom, 18)
+            .padding(.top, SettingsStyle.contentTopInset)
+            .frame(maxWidth: SettingsStyle.contentMaxWidth, alignment: .topLeading)
         }
+    }
+}
+
+private struct SettingsSectionTitle: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 6)
+    }
+}
+
+private struct SettingsCard<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(spacing: 0) {
+            content
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(SettingsStyle.cardBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(SettingsStyle.cardBorder)
+        )
+        // Newer macOS settings cards use subtler elevation.
+        .shadow(color: Color.black.opacity(0.03), radius: 6, x: 0, y: 2)
+        // Cards in System Settings are full-width within the content column.
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct SettingsCardDivider: View {
+    var body: some View {
+        Divider().padding(.leading, 14)
+    }
+}
+
+private struct SettingsRow<Accessory: View>: View {
+    let title: String
+    let subtitle: String?
+    @ViewBuilder var accessory: Accessory
+
+    init(_ title: String, subtitle: String? = nil, @ViewBuilder accessory: () -> Accessory) {
+        self.title = title
+        self.subtitle = subtitle
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        HStack(alignment: subtitle == nil ? .center : .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.primary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            accessory
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 }
 
@@ -435,38 +615,37 @@ private struct AppearanceSettingsView: View {
 
     var body: some View {
         SettingsPage(title: "Appearance") {
-            GroupBox("Screen") {
-                VStack(alignment: .leading, spacing: 12) {
-                    LabeledContent("Mode") {
-                        Picker("", selection: $mode) {
-                            Text("Automatic").tag(ScreenSelectionMode.automatic)
-                            Text("Specific").tag(ScreenSelectionMode.specificScreen)
+            SettingsSectionTitle(title: "Screen")
+            SettingsCard {
+                SettingsRow("Mode") {
+                    Picker("", selection: $mode) {
+                        Text("Automatic").tag(ScreenSelectionMode.automatic)
+                        Text("Specific").tag(ScreenSelectionMode.specificScreen)
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 260)
+                }
+
+                if mode == .specificScreen {
+                    SettingsCardDivider()
+                    SettingsRow("Display") {
+                        Picker("", selection: Binding(
+                            get: { selectedIdentifier },
+                            set: { newValue in
+                                selectedIdentifier = newValue
+                                applyScreenSelection()
+                            }
+                        )) {
+                            ForEach(screenSelector.availableScreens, id: \.self) { screen in
+                                let id = ScreenIdentifier(screen: screen)
+                                Text(screen.localizedName).tag(Optional(id))
+                            }
                         }
                         .labelsHidden()
-                        .pickerStyle(.segmented)
-                        .frame(width: 260)
-                    }
-
-                    if mode == .specificScreen {
-                        LabeledContent("Display") {
-                            Picker("", selection: Binding(
-                                get: { selectedIdentifier },
-                                set: { newValue in
-                                    selectedIdentifier = newValue
-                                    applyScreenSelection()
-                                }
-                            )) {
-                                ForEach(screenSelector.availableScreens, id: \.self) { screen in
-                                    let id = ScreenIdentifier(screen: screen)
-                                    Text(screen.localizedName).tag(Optional(id))
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(width: 320)
-                        }
+                        .frame(width: 320)
                     }
                 }
-                .padding(.top, 4)
             }
         }
         .onAppear {
@@ -507,26 +686,26 @@ private struct NotificationSettingsView: View {
 
     var body: some View {
         SettingsPage(title: "Notifications") {
-            GroupBox("Notification Sound") {
-                VStack(alignment: .leading, spacing: 12) {
-                    LabeledContent("Sound") {
-                        Picker("", selection: $selectedSound) {
-                            ForEach(NotificationSound.allCases, id: \.self) { sound in
-                                Text(sound.rawValue).tag(sound)
-                            }
+            SettingsSectionTitle(title: "Sound")
+            SettingsCard {
+                SettingsRow("Sound") {
+                    Picker("", selection: $selectedSound) {
+                        ForEach(NotificationSound.allCases, id: \.self) { sound in
+                            Text(sound.rawValue).tag(sound)
                         }
-                        .labelsHidden()
-                        .frame(width: 220)
                     }
-
-                    Button("Preview") {
+                    .labelsHidden()
+                    .frame(width: 220)
+                }
+                SettingsCardDivider()
+                SettingsRow("Preview") {
+                    Button("Play") {
                         if let name = selectedSound.soundName {
                             NSSound(named: name)?.play()
                         }
                     }
                     .disabled(selectedSound.soundName == nil)
                 }
-                .padding(.top, 4)
             }
         }
         .onAppear {
@@ -550,44 +729,37 @@ private struct PathsSettingsView: View {
 
     var body: some View {
         SettingsPage(title: "Paths") {
-            GroupBox("Claude Directory") {
-                VStack(alignment: .leading, spacing: 12) {
-                    LabeledContent("Mode") {
-                        Picker("", selection: $mode) {
-                            Text("Auto-detect").tag(Mode.auto)
-                            Text("Custom").tag(Mode.custom)
-                        }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                        .frame(width: 260)
+            SettingsSectionTitle(title: "Claude Directory")
+            SettingsCard {
+                SettingsRow("Mode") {
+                    Picker("", selection: $mode) {
+                        Text("Auto-detect").tag(Mode.auto)
+                        Text("Custom").tag(Mode.custom)
                     }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 260)
+                }
 
-                    if mode == .custom {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Folder")
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(.secondary)
-
-                            HStack(spacing: 10) {
-                                TextField("", text: $customPath)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 420)
-
-                                Button("Choose…") {
-                                    chooseFolder()
-                                }
-                            }
+                if mode == .custom {
+                    SettingsCardDivider()
+                    SettingsRow("Folder") {
+                        HStack(spacing: 10) {
+                            TextField("", text: $customPath)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 380)
+                            Button("Choose…") { chooseFolder() }
                         }
-                    }
-
-                    LabeledContent("Resolved") {
-                        Text(shortenedPath(ClaudePaths.claudeDir.path))
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .textSelection(.enabled)
                     }
                 }
-                .padding(.top, 4)
+
+                SettingsCardDivider()
+                SettingsRow("Resolved") {
+                    Text(shortenedPath(ClaudePaths.claudeDir.path))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
             }
         }
         .onAppear {
@@ -703,57 +875,56 @@ private struct RemoteSettingsView: View {
 
     var body: some View {
         SettingsPage(title: "Remote") {
-            GroupBox("Remote SSH") {
-                Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 12, verticalSpacing: 10) {
-                    GridRow {
-                        Text("Enabled")
-                        Toggle("", isOn: $enabled)
-                            .labelsHidden()
-                    }
-
-                    GridRow {
-                        Text("Host")
-                        TextField("example.com", text: $host)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 320)
-                    }
-
-                    GridRow {
-                        Text("User")
-                        TextField("(optional)", text: $user)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 220)
-                    }
-
-                    GridRow {
-                        Text("SSH Port")
-                        TextField("", value: $sshPort, formatter: SettingsNumberFormatters.port)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 120)
-                    }
-
-                    GridRow {
-                        Text("Remote Port")
-                        TextField("", value: $remotePort, formatter: SettingsNumberFormatters.port)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 120)
-                            .help("Remote listen port for ssh -R <remotePort>:127.0.0.1:<localPort>.")
-                    }
+            SettingsSectionTitle(title: "Remote SSH")
+            SettingsCard {
+                SettingsRow("Enabled") {
+                    Toggle("", isOn: $enabled).labelsHidden()
                 }
-                .padding(.top, 4)
+                SettingsCardDivider()
+                SettingsRow("Host") {
+                    TextField("example.com", text: $host)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 320)
+                }
+                SettingsCardDivider()
+                SettingsRow("User", subtitle: "optional") {
+                    TextField("", text: $user)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 220)
+                }
+                SettingsCardDivider()
+                SettingsRow("SSH Port") {
+                    TextField("", value: $sshPort, formatter: SettingsNumberFormatters.port)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                }
+                SettingsCardDivider()
+                SettingsRow("Remote Port", subtitle: "Remote listen port for ssh -R") {
+                    TextField("", value: $remotePort, formatter: SettingsNumberFormatters.port)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 120)
+                        .help("Remote listen port for ssh -R <remotePort>:127.0.0.1:<localPort>.")
+                }
             }
 
-            GroupBox("Connection") {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text(isConnected ? "Connected" : "Disconnected")
-                            .foregroundStyle(isConnected ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
-                        Spacer()
+            Spacer().frame(height: 12)
+
+            SettingsSectionTitle(title: "Connection")
+            SettingsCard {
+                SettingsRow(isConnected ? "Connected" : "Disconnected") {
+                    HStack(spacing: 10) {
                         if isWorking {
                             ProgressView().controlSize(.small)
                         }
+                        Text("")
                     }
+                }
+                .overlay(alignment: .trailing) {
+                    Text(isConnected ? "" : "")
+                }
 
+                SettingsCardDivider()
+                SettingsRow("Actions") {
                     HStack(spacing: 10) {
                         Button(isConnected ? "Disconnect" : "Connect") {
                             Task { await toggleConnection() }
@@ -765,21 +936,23 @@ private struct RemoteSettingsView: View {
                         }
                         .disabled(isWorking || normalized.host.isEmpty)
                     }
+                }
 
-                    if let statusText {
-                        Text(statusText)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                if let statusText {
+                    SettingsCardDivider()
+                    SettingsRow("Status", subtitle: statusText) { EmptyView() }
+                }
 
-                    if let error = displayedErrorText {
+                if let error = displayedErrorText {
+                    SettingsCardDivider()
+                    SettingsRow("Error") {
                         Text(error)
-                            .font(.caption)
+                            .font(.system(size: 11))
                             .foregroundStyle(.red)
                             .textSelection(.enabled)
+                            .frame(maxWidth: 420, alignment: .leading)
                     }
                 }
-                .padding(.top, 4)
             }
         }
         .onAppear {
@@ -903,9 +1076,11 @@ private struct SystemSettingsView: View {
 
     var body: some View {
         SettingsPage(title: "System") {
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    Toggle("Launch at Login", isOn: $launchAtLogin)
+            SettingsSectionTitle(title: "System")
+            SettingsCard {
+                SettingsRow("Launch at Login") {
+                    Toggle("", isOn: $launchAtLogin)
+                        .labelsHidden()
                         .onChange(of: launchAtLogin) { _, newValue in
                             do {
                                 if newValue {
@@ -914,13 +1089,15 @@ private struct SystemSettingsView: View {
                                     try SMAppService.mainApp.unregister()
                                 }
                             } catch {
-                                // Revert on failure
                                 launchAtLogin = SMAppService.mainApp.status == .enabled
                                 print("Failed to toggle launch at login: \(error)")
                             }
                         }
-
-                    Toggle("Hooks", isOn: $hooksInstalled)
+                }
+                SettingsCardDivider()
+                SettingsRow("Hooks") {
+                    Toggle("", isOn: $hooksInstalled)
+                        .labelsHidden()
                         .onChange(of: hooksInstalled) { _, newValue in
                             if newValue {
                                 HookInstaller.installIfNeeded()
@@ -932,11 +1109,11 @@ private struct SystemSettingsView: View {
                 }
             }
 
-            GroupBox("Accessibility") {
-                HStack {
-                    Text(AXIsProcessTrusted() ? "Enabled" : "Disabled")
-                        .foregroundStyle(AXIsProcessTrusted() ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
-                    Spacer()
+            Spacer().frame(height: 12)
+
+            SettingsSectionTitle(title: "Accessibility")
+            SettingsCard {
+                SettingsRow(AXIsProcessTrusted() ? "Enabled" : "Disabled") {
                     if !AXIsProcessTrusted() {
                         Button("Open System Settings") {
                             if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
@@ -945,7 +1122,6 @@ private struct SystemSettingsView: View {
                         }
                     }
                 }
-                .padding(.top, 4)
             }
         }
     }
@@ -962,37 +1138,47 @@ private struct AboutSettingsView: View {
 
     var body: some View {
         SettingsPage(title: "About") {
-            GroupBox {
-                LabeledContent("Version", value: appVersion)
+            SettingsSectionTitle(title: "App")
+            SettingsCard {
+                SettingsRow("Version") {
+                    Text(appVersion)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
             }
 
-            GroupBox("Updates") {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
+            Spacer().frame(height: 12)
+
+            SettingsSectionTitle(title: "Updates")
+            SettingsCard {
+                SettingsRow("Status") {
+                    HStack(spacing: 10) {
                         Text(updateStatusText)
                             .foregroundStyle(.secondary)
-                        Spacer()
                         if updateManager.state.isActive {
                             ProgressView().controlSize(.small)
                         }
                     }
-                    updateActions
                 }
-                .padding(.top, 4)
+                SettingsCardDivider()
+                SettingsRow("Actions") { updateActions }
             }
 
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    Button("Star on GitHub") {
+            Spacer().frame(height: 12)
+
+            SettingsSectionTitle(title: "Actions")
+            SettingsCard {
+                SettingsRow("Star on GitHub") {
+                    Button("Open") {
                         if let url = URL(string: "https://github.com/farouqaldori/claude-island") {
                             NSWorkspace.shared.open(url)
                         }
                     }
-
-                    Button("Quit") {
-                        NSApplication.shared.terminate(nil)
-                    }
-                    .foregroundStyle(.red)
+                }
+                SettingsCardDivider()
+                SettingsRow("Quit") {
+                    Button("Quit") { NSApplication.shared.terminate(nil) }
+                        .foregroundStyle(.red)
                 }
             }
         }
