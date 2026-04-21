@@ -9,7 +9,7 @@
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "com.claudeisland", category: "CocoHooks")
+private let logger = Logger(subsystem: "com.codingisland", category: "CocoHooks")
 
 struct CocoHookInstaller {
 
@@ -17,16 +17,12 @@ struct CocoHookInstaller {
 
     /// Install Coco hooks
     static func install() {
-        // 1. Ensure hooks directory exists
-        let hooksDir = CocoPaths.hooksDir
-        try? FileManager.default.createDirectory(
-            at: hooksDir,
-            withIntermediateDirectories: true
-        )
+        // 1. Ensure shared hooks directory exists
+        IslandPaths.ensureDirectoriesExist()
 
         // 2. Copy Python hook script
-        let hookScript = CocoPaths.hookScriptPath
-        if let bundled = Bundle.main.url(forResource: "coco-island-state", withExtension: "py") {
+        let hookScript = IslandPaths.cocoHookScriptPath
+        if let bundled = Bundle.main.url(forResource: "coding-island-coco-hook", withExtension: "py") {
             // Remove existing and copy new
             try? FileManager.default.removeItem(at: hookScript)
             try? FileManager.default.copyItem(at: bundled, to: hookScript)
@@ -39,7 +35,7 @@ struct CocoHookInstaller {
 
             logger.info("Installed Coco hook script")
         } else {
-            logger.warning("Could not find bundled coco-island-state.py")
+            logger.warning("Could not find bundled coding-island-coco-hook.py")
         }
 
         // 3. Update Coco config file
@@ -49,7 +45,7 @@ struct CocoHookInstaller {
     /// Uninstall Coco hooks
     static func uninstall() {
         // Remove hook script
-        try? FileManager.default.removeItem(at: CocoPaths.hookScriptPath)
+        try? FileManager.default.removeItem(at: IslandPaths.cocoHookScriptPath)
 
         // Remove hooks from config
         removeHooksFromConfig()
@@ -60,13 +56,13 @@ struct CocoHookInstaller {
     /// Check if hooks are installed
     static func isInstalled() -> Bool {
         // Check if hook script exists
-        guard FileManager.default.fileExists(atPath: CocoPaths.hookScriptPath.path) else {
+        guard FileManager.default.fileExists(atPath: IslandPaths.cocoHookScriptPath.path) else {
             return false
         }
 
         // Check if config has our hooks
         let configContent = readConfigFile()
-        return configContent.contains("coco-island-state.py")
+        return configContent.contains("coding-island-coco-hook.py")
     }
 
     // MARK: - Config File Management
@@ -82,7 +78,7 @@ struct CocoHookInstaller {
         let python = detectPython()
         let command = "\(python) \(CocoPaths.hookScriptShellPath)"
         let hookEntry = """
-          # Claude Island hook for Coco/Trae CLI (all events)
+          # Coding Island hook for Coco/Trae CLI (all events)
           - type: command
             command: \(command)
             # Allow enough time for Island-driven permission decisions.
@@ -229,7 +225,7 @@ struct CocoHookInstaller {
 
                     // Check if this hook contains our script reference
                     let blockContent = hookBlock.joined(separator: "\n")
-                    if blockContent.contains("coco-island-state.py") {
+                    if blockContent.contains("coding-island-coco-hook.py") || blockContent.contains("coco-island-state.py") {
                         // Skip this hook block
                         skipUntilNextTopLevel = true
                         currentHookIndent = 2
@@ -244,7 +240,7 @@ struct CocoHookInstaller {
                     if line.hasPrefix("  - ") {
                         skipUntilNextTopLevel = false
                         // Re-check this line
-                        if !line.contains("coco-island-state.py") {
+                        if !line.contains("coding-island-coco-hook.py") && !line.contains("coco-island-state.py") {
                             result.append(line)
                         }
                     }
@@ -266,9 +262,9 @@ struct CocoHookInstaller {
 
         // Generate a single hook entry with all matchers (cleaner than multiple entries)
         return """
-# === Claude Island Hooks for Coco ===
+# === Coding Island Hooks for Coco ===
 hooks:
-  # Claude Island hook for Coco/Trae CLI (all events)
+  # Coding Island hook for Coco/Trae CLI (all events)
   - type: command
     command: \(command)
     # Allow enough time for Island-driven permission decisions.
@@ -288,7 +284,7 @@ hooks:
       - event: session_end
       - event: pre_compact
       - event: post_compact
-# === End Claude Island Hooks ===
+# === End Coding Island Hooks ===
 """
     }
 

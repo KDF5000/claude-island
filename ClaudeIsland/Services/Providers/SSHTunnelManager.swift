@@ -10,7 +10,7 @@ import Combine
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "com.claudeisland", category: "SSHTunnel")
+private let logger = Logger(subsystem: "com.codingisland", category: "SSHTunnel")
 
 /// Represents an active SSH tunnel
 struct SSHTunnel: Identifiable, Equatable {
@@ -63,17 +63,17 @@ class SSHTunnelManager: ObservableObject {
 
     // MARK: - Constants
 
-    /// Default port for Claude Island TCP socket
+    /// Default port for Coding Island TCP socket
     static let defaultPort = 19999
 
     /// Socket path for Unix domain socket
-    static let socketPath = "/tmp/claude-island.sock"
+    static let socketPath = IslandPaths.socketPath
 
     // MARK: - Private
 
     private var tunnelProcesses: [UUID: Process] = [:]
 
-    private let detectionQueue = DispatchQueue(label: "com.claudeisland.SSHTunnelDetection")
+    private let detectionQueue = DispatchQueue(label: "com.codingisland.SSHTunnelDetection")
     private var detectionTimer: DispatchSourceTimer?
 
     /// When we intentionally terminate a tunnel (user disconnect, replacement, etc),
@@ -638,12 +638,12 @@ class SSHTunnelManager: ObservableObject {
     // MARK: - Remote hook bootstrap
 
     /// Uploads the remote hook script to the remote host over SSH.
-    /// Writes to `~/.claude/hooks/claude-island-remote-hook.py` by default.
+    /// Writes to `~/.coding-island/hooks/coding-island-remote-hook.py` by default.
     func installRemoteHook(
         host: String,
         user: String? = nil,
         sshPort: Int = 22,
-        remotePath: String = "~/.claude/hooks/claude-island-remote-hook.py",
+        remotePath: String = "~/.coding-island/hooks/coding-island-remote-hook.py",
         tcpPort: Int = SSHTunnelManager.defaultPort,
         localPort: Int = SSHTunnelManager.defaultPort
     ) async -> Result<Void, Error> {
@@ -684,7 +684,7 @@ class SSHTunnelManager: ObservableObject {
         }()
 
         let escapedPath = expandedPath.replacingOccurrences(of: "\"", with: "\\\"")
-        let cmd = "mkdir -p \"$HOME/.claude/hooks\" && cat > \"\(escapedPath)\" && chmod 755 \"\(escapedPath)\""
+        let cmd = "mkdir -p \"$HOME/.coding-island/hooks\" && cat > \"\(escapedPath)\" && chmod 755 \"\(escapedPath)\""
         let cmdArg = Self.shellSingleQuote(cmd)
         args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
 
@@ -747,7 +747,7 @@ class SSHTunnelManager: ObservableObject {
 
     private func loadBundledRemoteHookScript() -> String? {
         // If the .py is added to Copy Bundle Resources, this will work in release builds.
-        guard let url = Bundle.main.url(forResource: "claude-island-remote-hook", withExtension: "py") else {
+        guard let url = Bundle.main.url(forResource: "coding-island-remote-hook", withExtension: "py") else {
             return nil
         }
         return try? String(contentsOf: url, encoding: .utf8)
@@ -760,9 +760,9 @@ class SSHTunnelManager: ObservableObject {
     /// Fallback script content, used when the file is not bundled.
     private static let fallbackRemoteHookScript: String = #"""
 #!/usr/bin/env python3
-# Claude Island Remote Hook
+# Coding Island Remote Hook
 # - For use on remote servers accessed via SSH
-# - Connects to local Claude Island via SSH tunnel (Unix socket or TCP)
+# - Connects to local Coding Island via SSH tunnel (Unix socket or TCP)
 # - Install: Copy to remote server and configure in coco/claude settings
 
 import json
@@ -772,7 +772,7 @@ import sys
 import subprocess
 
 # Unix socket path (forwarded via SSH -R)
-SOCKET_PATH = "/tmp/claude-island.sock"
+SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
 
 # TCP fallback (forwarded via SSH -R 19999:127.0.0.1:19999)
 TCP_HOST = "127.0.0.1"
@@ -874,7 +874,7 @@ def send_event(state):
             sock.close()
         return None
     except (socket.error, OSError, json.JSONDecodeError) as e:
-        print(f"ClaudeIsland remote hook error: {e}", file=sys.stderr)
+        print(f"CodingIsland remote hook error: {e}", file=sys.stderr)
         return None
 
 
@@ -1052,7 +1052,7 @@ def main():
                     "hookSpecificOutput": {
                         "decision": {
                             "behavior": "deny",
-                            "message": reason or "Denied by user via ClaudeIsland"
+                            "message": reason or "Denied by user via CodingIsland"
                         }
                     }
                 }
@@ -1092,9 +1092,9 @@ if __name__ == "__main__":
         let hostString = user != nil ? "\(user!)@\(host)" : host
         return """
         # Run this command on your LOCAL machine to set up SSH tunnel
-        # This forwards the remote socket to your local Claude Island app
+        # This forwards the remote socket to your local Coding Island app
 
-        ssh -R /tmp/claude-island.sock:/tmp/claude-island.sock \(hostString) -N
+        ssh -R /tmp/coding-island.sock:\(Self.socketPath) \(hostString) -N
 
         # Or for TCP mode (if Unix socket forwarding doesn't work):
         # ssh -R 19999:127.0.0.1:19999 \(hostString) -N
@@ -1117,9 +1117,9 @@ extension SSHTunnelManager {
         """
         #!/usr/bin/env python3
         \"\"\"
-        Claude Island Remote Hook
+        Coding Island Remote Hook
         - For use on remote servers accessed via SSH
-        - Connects to local Claude Island via SSH tunnel
+        - Connects to local Coding Island via SSH tunnel
         \"\"\"
 
         import json
@@ -1128,7 +1128,7 @@ extension SSHTunnelManager {
         import sys
 
         # Try Unix socket first (SSH -R forwarding)
-        SOCKET_PATH = "/tmp/claude-island.sock"
+        SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
         # Fall back to TCP (SSH -R port forwarding)
         TCP_HOST = "127.0.0.1"
         TCP_PORT = 19999

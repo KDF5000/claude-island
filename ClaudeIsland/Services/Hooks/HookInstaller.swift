@@ -11,15 +11,12 @@ struct HookInstaller {
 
     /// Install hook script and update settings.json on app launch
     static func installIfNeeded() {
-        let hooksDir = ClaudePaths.hooksDir
-        let pythonScript = hooksDir.appendingPathComponent("claude-island-state.py")
+        IslandPaths.ensureDirectoriesExist()
+        IslandPaths.cleanupLegacyHooks()
 
-        try? FileManager.default.createDirectory(
-            at: hooksDir,
-            withIntermediateDirectories: true
-        )
+        let pythonScript = IslandPaths.claudeHookScriptPath
 
-        if let bundled = Bundle.main.url(forResource: "claude-island-state", withExtension: "py") {
+        if let bundled = Bundle.main.url(forResource: "coding-island-claude-hook", withExtension: "py") {
             try? FileManager.default.removeItem(at: pythonScript)
             try? FileManager.default.copyItem(at: bundled, to: pythonScript)
             try? FileManager.default.setAttributes(
@@ -31,6 +28,47 @@ struct HookInstaller {
         updateSettings(at: ClaudePaths.settingsFile)
     }
 
+    /// Remove legacy hook entries from Claude Code's settings.json that
+    /// reference the old script path (claude-island-state.py).
+    static func cleanupLegacySettingsEntries() {
+        let settings = ClaudePaths.settingsFile
+        guard let data = try? Data(contentsOf: settings),
+              var json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              var hooks = json["hooks"] as? [String: Any] else {
+            return
+        }
+
+        var changed = false
+        for (event, value) in hooks {
+            if var entries = value as? [[String: Any]] {
+                let cleaned = entries.compactMap { removingLegacyHooks(from: $0) }
+                if cleaned.count != entries.count {
+                    changed = true
+                    if cleaned.isEmpty {
+                        hooks.removeValue(forKey: event)
+                    } else {
+                        hooks[event] = cleaned
+                    }
+                }
+            }
+        }
+
+        guard changed else { return }
+
+        if hooks.isEmpty {
+            json.removeValue(forKey: "hooks")
+        } else {
+            json["hooks"] = hooks
+        }
+
+        if let data = try? JSONSerialization.data(
+            withJSONObject: json,
+            options: [.prettyPrinted, .sortedKeys]
+        ) {
+            try? data.write(to: settings)
+        }
+    }
+
     private static func updateSettings(at settingsURL: URL) {
         var json: [String: Any] = [:]
         if let data = try? Data(contentsOf: settingsURL),
@@ -39,7 +77,7 @@ struct HookInstaller {
         }
 
         let python = detectPython()
-        let command = "\(python) \(ClaudePaths.hookScriptShellPath)"
+        let command = "\(python) \(IslandPaths.claudeHookScriptShellPath)"
         let hookEntry: [[String: Any]] = [["type": "command", "command": command]]
         let hookEntryWithTimeout: [[String: Any]] = [["type": "command", "command": command, "timeout": 86400]]
         let withMatcher: [[String: Any]] = [["matcher": "*", "hooks": hookEntry]]
@@ -52,14 +90,13 @@ struct HookInstaller {
 
         var hooks = json["hooks"] as? [String: Any] ?? [:]
 
-        // Strip any existing Claude Island hooks from ALL event types first — even
-        // events we no longer register. Fixes users who installed v1.3 on an older
-        // Claude Code and now have invalid keys like PermissionDenied sitting in
-        // their settings.json (issue #85).
+        // Strip any existing Coding Island hooks from ALL event types first — even
+        // events we no longer register. Fixes users who installed older versions
+        // and now have stale keys sitting in their settings.json.
         var cleanedHooks: [String: Any] = [:]
         for (event, value) in hooks {
             if let entries = value as? [[String: Any]] {
-                let cleaned = entries.compactMap { removingClaudeIslandHooks(from: $0) }
+                let cleaned = entries.compactMap { removingCodingIslandHooks(from: $0) }
                 if !cleaned.isEmpty {
                     cleanedHooks[event] = cleaned
                 }
@@ -231,7 +268,7 @@ struct HookInstaller {
                     if let entryHooks = entry["hooks"] as? [[String: Any]] {
                         for hook in entryHooks {
                             if let cmd = hook["command"] as? String,
-                               cmd.contains("claude-island-state.py") {
+                               cmd.contains("coding-island-claude-hook.py") {
                                 return true
                             }
                         }
@@ -244,8 +281,7 @@ struct HookInstaller {
 
     /// Uninstall hooks from settings.json and remove script
     static func uninstall() {
-        let hooksDir = ClaudePaths.hooksDir
-        let pythonScript = hooksDir.appendingPathComponent("claude-island-state.py")
+        let pythonScript = IslandPaths.claudeHookScriptPath
         let settings = ClaudePaths.settingsFile
 
         try? FileManager.default.removeItem(at: pythonScript)
@@ -258,7 +294,7 @@ struct HookInstaller {
 
         for (event, value) in hooks {
             if var entries = value as? [[String: Any]] {
-                entries = entries.compactMap { removingClaudeIslandHooks(from: $0) }
+                entries = entries.compactMap { removingCodingIslandHooks(from: $0) }
 
                 if entries.isEmpty {
                     hooks.removeValue(forKey: event)
@@ -300,12 +336,12 @@ struct HookInstaller {
         return "python"
     }
 
-    nonisolated private static func removingClaudeIslandHooks(from entry: [String: Any]) -> [String: Any]? {
+    nonisolated private static func removingCodingIslandHooks(from entry: [String: Any]) -> [String: Any]? {
         guard var entryHooks = entry["hooks"] as? [[String: Any]] else {
             return entry
         }
 
-        entryHooks.removeAll(where: isClaudeIslandHook)
+        entryHooks.removeAll(where: isCodingIslandHook)
         guard !entryHooks.isEmpty else { return nil }
 
         var updatedEntry = entry
@@ -313,7 +349,25 @@ struct HookInstaller {
         return updatedEntry
     }
 
-    nonisolated private static func isClaudeIslandHook(_ hook: [String: Any]) -> Bool {
+    nonisolated private static func isCodingIslandHook(_ hook: [String: Any]) -> Bool {
+        let cmd = hook["command"] as? String ?? ""
+        return cmd.contains("coding-island-claude-hook.py") || cmd.contains("claude-island-state.py")
+    }
+
+    nonisolated private static func removingLegacyHooks(from entry: [String: Any]) -> [String: Any]? {
+        guard var entryHooks = entry["hooks"] as? [[String: Any]] else {
+            return entry
+        }
+
+        entryHooks.removeAll(where: isLegacyHook)
+        guard !entryHooks.isEmpty else { return nil }
+
+        var updatedEntry = entry
+        updatedEntry["hooks"] = entryHooks
+        return updatedEntry
+    }
+
+    nonisolated private static func isLegacyHook(_ hook: [String: Any]) -> Bool {
         let cmd = hook["command"] as? String ?? ""
         return cmd.contains("claude-island-state.py")
     }

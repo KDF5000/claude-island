@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Claude Island Hook
-- Sends session state to ClaudeIsland.app via Unix socket
+Coding Island Hook (Claude Code)
+- Sends session state to CodingIsland.app via Unix socket
 - For PermissionRequest: waits for user decision from the app
 """
 import json
@@ -9,7 +9,7 @@ import os
 import socket
 import sys
 
-SOCKET_PATH = "/tmp/claude-island.sock"
+SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
 TIMEOUT_SECONDS = 300  # 5 minutes for permission decisions
 
 
@@ -168,7 +168,7 @@ def main():
                         "hookEventName": "PermissionRequest",
                         "decision": {
                             "behavior": "deny",
-                            "message": reason or "Denied by user via ClaudeIsland",
+                            "message": reason or "Denied by user via CodingIsland",
                         },
                     }
                 }

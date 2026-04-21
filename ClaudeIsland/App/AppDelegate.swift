@@ -71,6 +71,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Mixpanel.mainInstance().track(event: "App Launched")
         Mixpanel.mainInstance().flush()
 
+        // Ensure shared directory and migrate from old locations
+        IslandPaths.ensureDirectoriesExist()
+        IslandPaths.cleanupLegacyHooks()
+        HookInstaller.cleanupLegacySettingsEntries()
+
         HookInstaller.installIfNeeded()
 
         // Start all available providers (including Coco/Trae CLI)
@@ -211,7 +216,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func ensureSingleInstance() -> Bool {
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.farouqaldori.ClaudeIsland"
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.celestial.CodingIsland"
         let runningApps = NSWorkspace.shared.runningApplications.filter {
             $0.bundleIdentifier == bundleID
         }
@@ -718,103 +723,50 @@ private struct NotificationSettingsView: View {
 }
 
 private struct PathsSettingsView: View {
-    private enum Mode: String, CaseIterable, Identifiable {
-        case auto
-        case custom
-        var id: String { rawValue }
-    }
-
-    @State private var mode: Mode = .auto
-    @State private var customPath: String = ""
-
     var body: some View {
         SettingsPage(title: "Paths") {
-            SettingsSectionTitle(title: "Claude Directory")
+            SettingsSectionTitle(title: "Claude Code")
             SettingsCard {
-                SettingsRow("Mode") {
-                    Picker("", selection: $mode) {
-                        Text("Auto-detect").tag(Mode.auto)
-                        Text("Custom").tag(Mode.custom)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 260)
-                }
-
-                if mode == .custom {
-                    SettingsCardDivider()
-                    SettingsRow("Folder") {
-                        HStack(spacing: 10) {
-                            TextField("", text: $customPath)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 380)
-                            Button("Choose…") { chooseFolder() }
-                        }
-                    }
-                }
-
-                SettingsCardDivider()
-                SettingsRow("Resolved") {
+                SettingsRow("Config Directory") {
                     Text(shortenedPath(ClaudePaths.claudeDir.path))
                         .font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .textSelection(.enabled)
                 }
+                SettingsCardDivider()
+                SettingsRow("Projects Directory") {
+                    Text(shortenedPath(ClaudePaths.projectsDir.path))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
             }
-        }
-        .onAppear {
-            let current = AppSettings.claudeDirectoryName
-            if !current.isEmpty && current != ".claude" {
-                mode = .custom
-                customPath = current
-            } else {
-                mode = .auto
-                customPath = ""
+
+            Spacer().frame(height: 12)
+
+            SettingsSectionTitle(title: "Coding Island")
+            SettingsCard {
+                SettingsRow("Shared Directory") {
+                    Text(shortenedPath(IslandPaths.rootDir.path))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                SettingsCardDivider()
+                SettingsRow("Hooks") {
+                    Text(shortenedPath(IslandPaths.hooksDir.path))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                SettingsCardDivider()
+                SettingsRow("Socket") {
+                    Text(shortenedPath(IslandPaths.socketPath))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
             }
-        }
-        .onChange(of: mode) { _, newMode in
-            if newMode == .auto {
-                applyAutoDetect()
-            } else if customPath.isEmpty {
-                // Give the user a sensible starting point.
-                customPath = ClaudePaths.claudeDir.path
-            }
-        }
-        .onChange(of: customPath) { _, newValue in
-            guard mode == .custom else { return }
-            applyCustomPath(newValue)
-        }
-    }
-
-    private func applyAutoDetect() {
-        AppSettings.claudeDirectoryName = ".claude"
-        ClaudePaths.invalidateCache()
-        HookInstaller.installIfNeeded()
-    }
-
-    private func applyCustomPath(_ path: String) {
-        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
-        AppSettings.claudeDirectoryName = trimmed
-        ClaudePaths.invalidateCache()
-        HookInstaller.installIfNeeded()
-    }
-
-    private func chooseFolder() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose Claude Config Directory"
-        panel.message = "Select the folder Claude Code uses (typically ~/.claude or ~/.config/claude)."
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        panel.showsHiddenFiles = true
-        panel.canCreateDirectories = false
-        panel.directoryURL = ClaudePaths.claudeDir
-
-        if panel.runModal() == .OK, let url = panel.url {
-            mode = .custom
-            customPath = url.path
-            applyCustomPath(url.path)
         }
     }
 

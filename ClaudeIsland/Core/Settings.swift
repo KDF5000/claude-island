@@ -38,7 +38,6 @@ enum AppSettings {
 
     private enum Keys {
         static let notificationSound = "notificationSound"
-        static let claudeDirectoryName = "claudeDirectoryName"
 
         static let remoteSSHEnabled = "remoteSSHEnabled"
         static let remoteSSHHost = "remoteSSHHost"
@@ -65,24 +64,9 @@ enum AppSettings {
         }
     }
 
-    // MARK: - Claude Directory
-
-    /// The name of the Claude config directory under the user's home folder.
-    /// Defaults to ".claude" (standard Claude Code installation).
-    /// Change to ".claude-internal" (or similar) for enterprise/custom distributions.
-    static var claudeDirectoryName: String {
-        get {
-            let value = defaults.string(forKey: Keys.claudeDirectoryName) ?? ""
-            return value.isEmpty ? ".claude" : value
-        }
-        set {
-            defaults.set(newValue.trimmingCharacters(in: .whitespaces), forKey: Keys.claudeDirectoryName)
-        }
-    }
-
     // MARK: - Remote SSH
 
-    /// Whether Claude Island should maintain an SSH reverse tunnel to a remote host.
+    /// Whether Coding Island should maintain an SSH reverse tunnel to a remote host.
     static var remoteSSHEnabled: Bool {
         get { defaults.bool(forKey: Keys.remoteSSHEnabled) }
         set { defaults.set(newValue, forKey: Keys.remoteSSHEnabled) }
@@ -115,7 +99,7 @@ enum AppSettings {
     /// Remote reverse-tunnel port (default 19999).
     ///
     /// This is the port that will be bound on the *remote* host (remote 127.0.0.1:<port>)
-    /// and forwarded back to Claude Island running locally.
+    /// and forwarded back to Coding Island running locally.
     static var remoteSSHTunnelPort: Int {
         get {
             let value = defaults.integer(forKey: Keys.remoteSSHTunnelPort)

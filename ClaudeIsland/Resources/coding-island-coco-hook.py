@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Coco Island Hook
-- Sends Coco agent state to ClaudeIsland.app via Unix socket
+Coding Island Hook (Coco/Trae CLI)
+- Sends Coco agent state to CodingIsland.app via Unix socket
 - Supports PermissionRequest with user decision response
 - Compatible with Coco (Trae CLI) hook system
 """
@@ -13,8 +13,8 @@ import sys
 import subprocess
 import time
 
-SOCKET_PATH = "/tmp/claude-island.sock"
-# Overall budget for waiting on a permission decision from ClaudeIsland.
+SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
+# Overall budget for waiting on a permission decision from CodingIsland.
 # Note: Coco's hook config must have a timeout >= this value.
 TIMEOUT_SECONDS = 300  # 5 minutes
 PROVIDER_ID = "coco"
@@ -108,7 +108,7 @@ def _resolve_transcript_path(session_id, transcript_path):
         except Exception:
             pass
 
-    # Fallback to Coco cache locations used by ClaudeIsland's parser.
+    # Fallback to Coco cache locations used by CodingIsland's parser.
     home = os.path.expanduser("~")
     candidates = [
         f"{home}/Library/Caches/coco/sessions/{session_id}/traces.jsonl",
@@ -319,7 +319,7 @@ def main():
                         "hookEventName": event,
                         "decision": {
                             "behavior": "deny",
-                            "message": reason or "Denied by user via ClaudeIsland"
+                            "message": reason or "Denied by user via CodingIsland"
                         }
                     }
                 }

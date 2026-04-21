@@ -46,7 +46,7 @@ actor ConversationParser {
     static let shared = ConversationParser()
 
     /// Logger for conversation parser (nonisolated static for cross-context access)
-    nonisolated static let logger = Logger(subsystem: "com.claudeisland", category: "Parser")
+    nonisolated static let logger = Logger(subsystem: "com.codingisland", category: "Parser")
 
     /// Shared ISO8601 date formatter (expensive to create, reused across all message parsing)
     private let isoFormatter: ISO8601DateFormatter = {
@@ -681,27 +681,30 @@ actor ConversationParser {
 
     /// Path to the JSONL file
     private static func sessionFilePath(sessionId: String, cwd: String) -> String {
-        // First check our fallback/remote cache
         let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
+
+        // 1. Remote session cache (Coding Island's own cache for remote sessions)
+        let islandCachePath = IslandPaths.remoteCacheDir.path + "/" + projectDir + "/" + sessionId + ".jsonl"
+        if FileManager.default.fileExists(atPath: islandCachePath) {
+            logger.info("[Parser] sessionFilePath: using island cache for \(sessionId.prefix(8), privacy: .public)")
+            return islandCachePath
+        }
+
+        // 2. Local Claude Code sessions
         let claudePath = ClaudePaths.projectsDir.path + "/" + projectDir + "/" + sessionId + ".jsonl"
-        
-        // Local Coco (Trae CLI) sessions: events.jsonl has conversation messages.
-        // traces.jsonl is OpenTelemetry spans only and cannot be parsed for messages.
-        let cocoPath = NSHomeDirectory() + "/Library/Caches/coco/sessions/\(sessionId)/events.jsonl"
-        
-        // If it exists in Claude Island cache, use that (e.g. remote sessions)
         if FileManager.default.fileExists(atPath: claudePath) {
             logger.info("[Parser] sessionFilePath: using claude path for \(sessionId.prefix(8), privacy: .public): \(claudePath, privacy: .public)")
             return claudePath
         }
-        
-        // Otherwise, fall back to Coco local path
+
+        // 3. Local Coco (Trae CLI) sessions
+        let cocoPath = NSHomeDirectory() + "/Library/Caches/coco/sessions/\(sessionId)/events.jsonl"
         if FileManager.default.fileExists(atPath: cocoPath) {
             logger.info("[Parser] sessionFilePath: using coco path for \(sessionId.prefix(8), privacy: .public)")
             return cocoPath
         }
 
-        // Return claudePath as default if neither exists
+        // Return claudePath as default if none exists
         logger.info("[Parser] sessionFilePath: returning default claude path for \(sessionId.prefix(8), privacy: .public): \(claudePath, privacy: .public)")
         return claudePath
     }

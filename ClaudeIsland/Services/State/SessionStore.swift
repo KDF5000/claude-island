@@ -17,7 +17,7 @@ actor SessionStore {
     static let shared = SessionStore()
 
     /// Logger for session store (nonisolated static for cross-context access)
-    nonisolated static let logger = Logger(subsystem: "com.claudeisland", category: "Session")
+    nonisolated static let logger = Logger(subsystem: "com.codingisland", category: "Session")
 
     // MARK: - State
 
@@ -1287,13 +1287,13 @@ actor SessionStore {
     /// then triggers an incremental file sync so the UI gets updated messages.
     ///
     /// The cache path mirrors ConversationParser's sessionFilePath logic:
-    ///   <projectsDir>/<escaped-cwd>/<sessionId>.jsonl
+    ///   <remoteCacheDir>/<escaped-cwd>/<sessionId>.jsonl
     /// so ConversationParser can find it without any changes.
     private func appendRemoteJsonlLines(_ lines: [String], sessionId: String, cwd: String) {
         let projectDir = cwd
             .replacingOccurrences(of: "/", with: "-")
             .replacingOccurrences(of: ".", with: "-")
-        let dir = ClaudePaths.projectsDir.appendingPathComponent(projectDir)
+        let dir = IslandPaths.remoteCacheDir.appendingPathComponent(projectDir)
         let filePath = dir.appendingPathComponent("\(sessionId).jsonl")
 
         Self.logger.info("[Remote] Appending \(lines.count) JSONL lines for session \(sessionId.prefix(8), privacy: .public) cwd=\(cwd, privacy: .public)")

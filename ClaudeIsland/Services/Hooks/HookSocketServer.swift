@@ -10,7 +10,7 @@ import Foundation
 import os.log
 
 /// Logger for hook socket server
-private let logger = Logger(subsystem: "com.claudeisland", category: "Hooks")
+private let logger = Logger(subsystem: "com.codingisland", category: "Hooks")
 
 /// Event received from Claude Code or Coco hooks
 struct HookEvent: Codable, Sendable {
@@ -156,7 +156,7 @@ typealias PermissionFailureHandler = @Sendable (_ sessionId: String, _ toolUseId
 /// Supports both Unix socket and TCP (for SSH tunnel support)
 class HookSocketServer {
     static let shared = HookSocketServer()
-    static let socketPath = "/tmp/claude-island.sock"
+    static let socketPath = IslandPaths.socketPath
     static let tcpPort: UInt16 = 19999  // TCP port for SSH tunnel support
 
     private var serverSocket: Int32 = -1
@@ -165,7 +165,7 @@ class HookSocketServer {
     private var tcpAcceptSource: DispatchSourceRead?
     private var eventHandler: HookEventHandler?
     private var permissionFailureHandler: PermissionFailureHandler?
-    private let queue = DispatchQueue(label: "com.claudeisland.socket", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.codingisland.socket", qos: .userInitiated)
 
     /// Pending permission requests indexed by toolUseId
     private var pendingPermissions: [String: PendingPermission] = [:]
@@ -192,6 +192,9 @@ class HookSocketServer {
 
         eventHandler = onEvent
         permissionFailureHandler = onPermissionFailure
+
+        // Ensure the directory exists before binding
+        IslandPaths.ensureDirectoriesExist()
 
         unlink(Self.socketPath)
 

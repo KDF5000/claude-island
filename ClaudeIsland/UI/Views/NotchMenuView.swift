@@ -232,7 +232,7 @@ struct RemoteSSHPickerRow: View {
                             isPrimary: false,
                             isDisabled: false
                         ) {
-                            copyToClipboard("python3 ~/.claude/hooks/claude-island-remote-hook.py")
+                            copyToClipboard("python3 ~/.coding-island/hooks/coding-island-remote-hook.py")
                             statusText = "已复制 hook 命令"
                             errorText = nil
                         }
@@ -266,7 +266,7 @@ struct RemoteSSHPickerRow: View {
                             .foregroundColor(Color(red: 1.0, green: 0.6, blue: 0.6).opacity(0.9))
                     }
 
-                    Text("提示：Connect 会在本机自动建立 ssh 反向转发（remote 127.0.0.1:\(tunnelPort) → local 127.0.0.1:\(SSHTunnelManager.defaultPort)），远端运行 hook 后即可把事件回传到 Claude Island。")
+                    Text("提示：Connect 会在本机自动建立 ssh 反向转发（remote 127.0.0.1:\(tunnelPort) → local 127.0.0.1:\(SSHTunnelManager.defaultPort)），远端运行 hook 后即可把事件回传到 Coding Island。")
                         .font(.system(size: 10))
                         .foregroundColor(.white.opacity(0.35))
                         .fixedSize(horizontal: false, vertical: true)
@@ -395,7 +395,7 @@ struct RemoteSSHPickerRow: View {
 
         switch result {
         case .success:
-            statusText = "已安装远端 hook：~/.claude/hooks/claude-island-remote-hook.py"
+            statusText = "已安装远端 hook：~/.coding-island/hooks/coding-island-remote-hook.py"
         case .failure(let error):
             errorText = "安装失败：\(error.localizedDescription)"
         }

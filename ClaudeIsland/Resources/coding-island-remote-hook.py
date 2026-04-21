@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Claude Island Remote Hook
+Coding Island Remote Hook
 - For use on remote servers accessed via SSH
-- Connects to local Claude Island via SSH tunnel (Unix socket or TCP)
+- Connects to local Coding Island via SSH tunnel (Unix socket or TCP)
 - Install: Copy to remote server and configure in coco/claude settings
 """
 
@@ -13,7 +13,7 @@ import sys
 import subprocess
 
 # Unix socket path (forwarded via SSH -R)
-SOCKET_PATH = "/tmp/claude-island.sock"
+SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
 
 # TCP fallback (forwarded via SSH -R 19999:127.0.0.1:19999)
 TCP_HOST = "127.0.0.1"
@@ -146,7 +146,7 @@ def send_event(state, wait_for_response=False, transcript_path=None):
             
         return None
     except (socket.error, OSError, json.JSONDecodeError) as e:
-        print(f"ClaudeIsland remote hook error: {e}", file=sys.stderr)
+        print(f"CodingIsland remote hook error: {e}", file=sys.stderr)
         return None
     finally:
         try:
@@ -346,7 +346,7 @@ def main():
                         "hookEventName": event,
                         "decision": {
                             "behavior": "deny",
-                            "message": reason or "Denied by user via ClaudeIsland"
+                            "message": reason or "Denied by user via CodingIsland"
                         }
                     }
                 }

@@ -10,7 +10,7 @@ import Combine
 import Foundation
 import os.log
 
-private let logger = Logger(subsystem: "com.claudeisland", category: "Providers")
+private let logger = Logger(subsystem: "com.codingisland", category: "Providers")
 
 /// Central registry for all agent providers
 @MainActor

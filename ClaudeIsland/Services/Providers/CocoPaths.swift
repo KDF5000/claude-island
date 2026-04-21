@@ -56,20 +56,19 @@ enum CocoPaths {
             .appendingPathComponent(".coco.yaml")
     }
 
-    /// Hooks directory (shared with Claude, or separate)
+    /// Hooks directory (shared via IslandPaths)
     static var hooksDir: URL {
-        // Use the same hooks directory as Claude for simplicity
-        ClaudePaths.hooksDir
+        IslandPaths.hooksDir
     }
 
     /// Hook script path
     static var hookScriptPath: URL {
-        hooksDir.appendingPathComponent("coco-island-state.py")
+        IslandPaths.cocoHookScriptPath
     }
 
     /// Shell-safe path for hook commands
     static var hookScriptShellPath: String {
-        shellQuote(hookScriptPath.path)
+        IslandPaths.cocoHookScriptShellPath
     }
 
     /// Coco transcript directory (if available)
@@ -86,9 +85,5 @@ enum CocoPaths {
                 .appendingPathComponent(".local/bin/coco").path,
         ]
         return candidates.contains { FileManager.default.fileExists(atPath: $0) }
-    }
-
-    private static func shellQuote(_ path: String) -> String {
-        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

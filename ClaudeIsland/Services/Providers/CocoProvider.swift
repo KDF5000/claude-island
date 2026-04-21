@@ -11,7 +11,7 @@ import Foundation
 import AppKit
 import os.log
 
-private let logger = Logger(subsystem: "com.claudeisland", category: "CocoProvider")
+private let logger = Logger(subsystem: "com.codingisland", category: "CocoProvider")
 
 // MARK: - Coco Provider Factory
 

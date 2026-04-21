@@ -52,7 +52,7 @@ actor ProcessExecutor: ProcessExecuting {
     nonisolated(unsafe) static let shared = ProcessExecutor()
 
     /// Logger for process execution (nonisolated static for cross-context access)
-    nonisolated static let logger = Logger(subsystem: "com.claudeisland", category: "ProcessExecutor")
+    nonisolated static let logger = Logger(subsystem: "com.codingisland", category: "ProcessExecutor")
 
     private init() {}
 

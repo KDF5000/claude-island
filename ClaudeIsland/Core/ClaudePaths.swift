@@ -2,9 +2,9 @@
 //  ClaudePaths.swift
 //  ClaudeIsland
 //
-//  Single source of truth for all Claude config directory paths.
-//  Resolves automatically via CLAUDE_CONFIG_DIR env var or filesystem detection,
-//  with an optional user override via AppSettings.claudeDirectoryName.
+//  Single source of truth for Claude Code config directory paths.
+//  Resolves automatically via CLAUDE_CONFIG_DIR env var or filesystem detection.
+//  Agent-independent paths (hooks, socket, cache) live in IslandPaths.
 //
 
 import Foundation
@@ -23,9 +23,8 @@ enum ClaudePaths {
     ///
     /// Resolution order:
     /// 1. CLAUDE_CONFIG_DIR environment variable (if set and exists)
-    /// 2. AppSettings.claudeDirectoryName override (if changed from default)
-    /// 3. ~/.config/claude/ (new default since Claude Code v2.1.30+, if projects/ exists)
-    /// 4. ~/.claude/ (legacy fallback)
+    /// 2. ~/.config/claude/ (new default since Claude Code v2.1.30+, if projects/ exists)
+    /// 3. ~/.claude/ (legacy fallback)
     static var claudeDir: URL {
         cacheLock.lock()
         if let cached = _cachedDir {
@@ -34,7 +33,7 @@ enum ClaudePaths {
         }
         cacheLock.unlock()
 
-        // Resolve outside the lock — involves filesystem and settings reads
+        // Resolve outside the lock — involves filesystem reads
         // that shouldn't block other threads.
         let resolved = resolveClaudeDir()
 
@@ -50,10 +49,6 @@ enum ClaudePaths {
         return resolved
     }
 
-    static var hooksDir: URL {
-        claudeDir.appendingPathComponent("hooks")
-    }
-
     static var settingsFile: URL {
         claudeDir.appendingPathComponent("settings.json")
     }
@@ -62,15 +57,7 @@ enum ClaudePaths {
         claudeDir.appendingPathComponent("projects")
     }
 
-    /// Shell-safe absolute path for hook commands in settings.json.
-    /// Absolute paths keep custom directories and ~/.config/claude working;
-    /// quoting keeps paths with spaces from being split by the shell.
-    static var hookScriptShellPath: String {
-        shellQuote(claudeDir.appendingPathComponent("hooks/claude-island-state.py").path)
-    }
-
     /// Invalidate the cached directory so the next access re-resolves.
-    /// Call this when the user changes AppSettings.claudeDirectoryName.
     static func invalidateCache() {
         cacheLock.lock()
         _cachedDir = nil
@@ -90,28 +77,13 @@ enum ClaudePaths {
             }
         }
 
-        // 2. User override via settings — accepts either an absolute path (chosen
-        //    via the folder picker) or a legacy directory name under ~/
-        let settingsValue = AppSettings.claudeDirectoryName
-        if !settingsValue.isEmpty && settingsValue != ".claude" {
-            if settingsValue.hasPrefix("/") {
-                return URL(fileURLWithPath: settingsValue)
-            } else {
-                return home.appendingPathComponent(settingsValue)
-            }
-        }
-
-        // 3. New default ~/.config/claude/ (if projects/ exists there)
+        // 2. New default ~/.config/claude/ (if projects/ exists there)
         let newDefault = home.appendingPathComponent(".config/claude")
         if fm.fileExists(atPath: newDefault.appendingPathComponent("projects").path) {
             return newDefault
         }
 
-        // 4. Legacy fallback
+        // 3. Legacy fallback
         return home.appendingPathComponent(".claude")
-    }
-
-    private static func shellQuote(_ path: String) -> String {
-        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 }

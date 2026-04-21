@@ -9,7 +9,7 @@ import AppKit
 import os.log
 
 /// Logger for window management
-private let logger = Logger(subsystem: "com.claudeisland", category: "Window")
+private let logger = Logger(subsystem: "com.codingisland", category: "Window")
 
 @MainActor
 class WindowManager {
