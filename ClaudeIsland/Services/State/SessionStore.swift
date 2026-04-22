@@ -223,7 +223,7 @@ actor SessionStore {
         processSubagentTracking(event: event, session: &session)
 
         if normalizedEvent == "permissionrequest", let toolUseId = event.toolUseId {
-            Self.logger.debug("Setting tool \(toolUseId.prefix(12), privacy: .public) status to waitingForApproval")
+            Self.logger.debug("Setting tool \(toolUseId, privacy: .public) status to waitingForApproval")
             updateToolStatus(in: &session, toolId: toolUseId, status: .waitingForApproval)
         }
 
@@ -319,7 +319,7 @@ actor SessionStore {
                         timestamp: Date()
                     )
                     session.chatItems.append(placeholderItem)
-                    Self.logger.debug("Created placeholder tool entry for \(toolUseId.prefix(16), privacy: .public)")
+                    Self.logger.debug("Created placeholder tool entry for \(toolUseId, privacy: .public)")
                 }
             }
 
@@ -687,20 +687,104 @@ actor SessionStore {
             Self.logger.debug("Clear reconciliation: kept \(session.chatItems.count) of \(previousCount) items")
         }
 
+        // Coco dual-approval fallback can create a permission placeholder tool_use_id
+        // (e.g. "<session_id>:<tool_name>") that later gets replaced by a real tool_use_id
+        // from JSONL. If we don't reconcile them, the UI can remain stuck showing a
+        // stale waiting-for-approval tool even after the user approved in the terminal.
+        func migratePermissionPlaceholderIfNeeded(
+            toolId: String,
+            toolName: String,
+            toolInput: [String: String],
+            timestamp: Date
+        ) -> Bool {
+            // If we already have an item for this toolId, nothing to migrate.
+            guard !session.chatItems.contains(where: { $0.id == toolId }) else { return false }
+
+            let preferredPlaceholderId = "\(payload.sessionId):\(toolName)"
+            let placeholderIdx = session.chatItems.firstIndex { item in
+                guard case .toolCall(let existingTool) = item.type else { return false }
+                guard existingTool.status == .waitingForApproval else { return false }
+
+                if item.id == preferredPlaceholderId {
+                    return true
+                }
+
+                // Fallback: any waiting placeholder from this session with same tool name.
+                return item.id.hasPrefix("\(payload.sessionId):") && existingTool.name == toolName
+            }
+
+            guard let idx = placeholderIdx,
+                  case .toolCall(let existingTool) = session.chatItems[idx].type else {
+                return false
+            }
+
+            let oldId = session.chatItems[idx].id
+
+            // Move toolTracker state so dedup/tool timing stays consistent.
+            if let progress = session.toolTracker.inProgress.removeValue(forKey: oldId) {
+                session.toolTracker.inProgress[toolId] = ToolInProgress(
+                    id: toolId,
+                    name: progress.name,
+                    startTime: progress.startTime,
+                    phase: progress.phase
+                )
+            }
+            session.toolTracker.seenIds.remove(oldId)
+            session.toolTracker.seenIds.insert(toolId)
+
+            // If the session phase is pointing at the placeholder, update the context to
+            // the real tool id so UI actions target the right thing.
+            if case .waitingForApproval(let ctx) = session.phase, ctx.toolUseId == oldId {
+                session.phase = .waitingForApproval(PermissionContext(
+                    toolUseId: toolId,
+                    toolName: ctx.toolName,
+                    toolInput: ctx.toolInput,
+                    receivedAt: ctx.receivedAt
+                ))
+            }
+
+            let newStatus: ToolStatus = (existingTool.status == .waitingForApproval) ? .running : existingTool.status
+            session.chatItems[idx] = ChatHistoryItem(
+                id: toolId,
+                type: .toolCall(ToolCallItem(
+                    name: toolName,
+                    input: toolInput,
+                    status: newStatus,
+                    result: existingTool.result,
+                    structuredResult: existingTool.structuredResult,
+                    subagentTools: existingTool.subagentTools
+                )),
+                timestamp: timestamp
+            )
+
+            Self.logger.debug("Migrated permission placeholder \(oldId, privacy: .public) -> \(toolId, privacy: .public)")
+            return true
+        }
+
         if payload.isIncremental {
             let existingIds = Set(session.chatItems.map { $0.id })
 
             for message in payload.messages {
                 for (blockIndex, block) in message.content.enumerated() {
                     if case .toolUse(let tool) = block {
+                        if migratePermissionPlaceholderIfNeeded(
+                            toolId: tool.id,
+                            toolName: tool.name,
+                            toolInput: tool.input,
+                            timestamp: message.timestamp
+                        ) {
+                            continue
+                        }
+
                         if let idx = session.chatItems.firstIndex(where: { $0.id == tool.id }) {
                             if case .toolCall(let existingTool) = session.chatItems[idx].type {
+                                let newStatus: ToolStatus = (existingTool.status == .waitingForApproval) ? .running : existingTool.status
                                 session.chatItems[idx] = ChatHistoryItem(
                                     id: tool.id,
                                     type: .toolCall(ToolCallItem(
                                         name: tool.name,
                                         input: tool.input,
-                                        status: existingTool.status,
+                                        status: newStatus,
                                         result: existingTool.result,
                                         structuredResult: existingTool.structuredResult,
                                         subagentTools: existingTool.subagentTools
@@ -734,14 +818,24 @@ actor SessionStore {
             for message in payload.messages {
                 for (blockIndex, block) in message.content.enumerated() {
                     if case .toolUse(let tool) = block {
+                        if migratePermissionPlaceholderIfNeeded(
+                            toolId: tool.id,
+                            toolName: tool.name,
+                            toolInput: tool.input,
+                            timestamp: message.timestamp
+                        ) {
+                            continue
+                        }
+
                         if let idx = session.chatItems.firstIndex(where: { $0.id == tool.id }) {
                             if case .toolCall(let existingTool) = session.chatItems[idx].type {
+                                let newStatus: ToolStatus = (existingTool.status == .waitingForApproval) ? .running : existingTool.status
                                 session.chatItems[idx] = ChatHistoryItem(
                                     id: tool.id,
                                     type: .toolCall(ToolCallItem(
                                         name: tool.name,
                                         input: tool.input,
-                                        status: existingTool.status,
+                                        status: newStatus,
                                         result: existingTool.result,
                                         structuredResult: existingTool.structuredResult,
                                         subagentTools: existingTool.subagentTools
@@ -781,6 +875,17 @@ actor SessionStore {
             cwd: payload.cwd,
             structuredResults: payload.structuredResults
         )
+
+        // If the user handled the permission prompt in the terminal (dual-approval fallback),
+        // the hook socket is already gone, but the UI can remain stuck in waitingForApproval.
+        // As soon as we observe new transcript activity, move out of approval UI.
+        if case .waitingForApproval = session.phase,
+           !HookSocketServer.shared.hasPendingPermission(sessionId: payload.sessionId),
+           (!payload.messages.isEmpty || !payload.completedToolIds.isEmpty) {
+            if session.phase.canTransition(to: .processing) {
+                session.phase = .processing
+            }
+        }
 
         sessions[payload.sessionId] = session
 
@@ -969,7 +1074,7 @@ actor SessionStore {
         }
         if !found {
             let count = session.chatItems.count
-            Self.logger.warning("Tool \(toolId.prefix(16), privacy: .public) not found in chatItems (count: \(count))")
+            Self.logger.warning("Tool \(toolId, privacy: .public) not found in chatItems (count: \(count))")
         }
     }
 
@@ -1215,6 +1320,11 @@ actor SessionStore {
             // This can happen when a PermissionRequest arrives without a resolvable tool_use_id
             // (cache miss) — the socket is closed in HookSocketServer, but the UI could remain
             // stuck in .waitingForApproval forever.
+            //
+            // IMPORTANT: In dual-approval mode, the hook *intentionally* closes its socket after
+            // a short timeout (so the CLI can show its own UI). In that case, we still want to
+            // keep the Island UI visible as long as we have a corresponding tool placeholder that
+            // is waiting for approval (users can approve via terminal keystroke fallback).
             if session.phase.isWaitingForApproval && !HookSocketServer.shared.hasPendingPermission(sessionId: sessionId) {
                 let hasRunningTool = session.chatItems.contains { item in
                     guard case .toolCall(let tool) = item.type else { return false }
@@ -1225,11 +1335,17 @@ actor SessionStore {
                     return tool.status == .waitingForApproval
                 }
 
-                let targetPhase: SessionPhase = (hasRunningTool || hasWaitingTool) ? .processing : .idle
-                if session.phase.canTransition(to: targetPhase) {
-                    session.phase = targetPhase
-                    sessions[sessionId] = session
-                    mutatedSession = true
+                // If we still have a waiting tool in the chat history, keep the session in
+                // waitingForApproval even if the socket is gone (dual-approval fallback).
+                if hasWaitingTool {
+                    // No-op
+                } else {
+                    let targetPhase: SessionPhase = hasRunningTool ? .processing : .idle
+                    if session.phase.canTransition(to: targetPhase) {
+                        session.phase = targetPhase
+                        sessions[sessionId] = session
+                        mutatedSession = true
+                    }
                 }
             }
 

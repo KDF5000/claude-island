@@ -165,73 +165,84 @@ struct InstanceRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
-            // State indicator on left
-            stateIndicator
-                .frame(width: 14)
+            // Row content (double-click to open chat) — exclude action buttons to avoid gesture conflicts
+            HStack(alignment: .center, spacing: 10) {
+                // State indicator on left
+                stateIndicator
+                    .frame(width: 14)
 
-            // Text content
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(session.displayTitle)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
+                // Text content
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(session.displayTitle)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
 
-                    // Provider badge (show for non-Claude providers)
-                    if session.providerId != "claude-code" {
-                        ProviderBadge(providerId: session.providerId, displayName: session.providerDisplayName)
-                    }
+                        // Provider badge (show for non-Claude providers)
+                        if session.providerId != "claude-code" {
+                            ProviderBadge(providerId: session.providerId, displayName: session.providerDisplayName)
+                        }
 
-                    // Token usage indicator
-                    if session.usage.totalTokens > 0 {
-                        Text(session.usage.formattedTotal)
-                            .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.3))
-                    }
-                }
-
-                // Show tool call when waiting for approval, otherwise last activity
-                if isWaitingForApproval, let toolName = session.pendingToolName {
-                    // Show tool name in amber + input on same line
-                    HStack(spacing: 4) {
-                        Text(MCPToolFormatter.formatToolName(toolName))
-                            .font(.system(size: 11, weight: .medium, design: .monospaced))
-                            .foregroundColor(TerminalColors.amber.opacity(0.9))
-                        if isInteractiveTool {
-                            Text("Needs your input")
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
-                        } else if let input = session.pendingToolInput {
-                            Text(input)
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.5))
-                                .lineLimit(1)
+                        // Token usage indicator
+                        if session.usage.totalTokens > 0 {
+                            Text(session.usage.formattedTotal)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.3))
                         }
                     }
-                } else if let role = session.lastMessageRole {
-                    switch role {
-                    case "tool":
-                        // Tool call - show tool name + input
+
+                    // Show tool call when waiting for approval, otherwise last activity
+                    if isWaitingForApproval, let toolName = session.pendingToolName {
+                        // Show tool name in amber + input on same line
                         HStack(spacing: 4) {
-                            if let toolName = session.lastToolName {
-                                Text(MCPToolFormatter.formatToolName(toolName))
-                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            Text(MCPToolFormatter.formatToolName(toolName))
+                                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                .foregroundColor(TerminalColors.amber.opacity(0.9))
+                            if isInteractiveTool {
+                                Text("Needs your input")
+                                    .font(.system(size: 11))
                                     .foregroundColor(.white.opacity(0.5))
-                            }
-                            if let input = session.lastMessage {
+                                    .lineLimit(1)
+                            } else if let input = session.pendingToolInput {
                                 Text(input)
                                     .font(.system(size: 11))
-                                    .foregroundColor(.white.opacity(0.4))
+                                    .foregroundColor(.white.opacity(0.5))
                                     .lineLimit(1)
                             }
                         }
-                    case "user":
-                        // User message - prefix with "You:"
-                        HStack(spacing: 4) {
-                            Text("You:")
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundColor(.white.opacity(0.5))
+                    } else if let role = session.lastMessageRole {
+                        switch role {
+                        case "tool":
+                            // Tool call - show tool name + input
+                            HStack(spacing: 4) {
+                                if let toolName = session.lastToolName {
+                                    Text(MCPToolFormatter.formatToolName(toolName))
+                                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                        .foregroundColor(.white.opacity(0.5))
+                                }
+                                if let input = session.lastMessage {
+                                    Text(input)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.white.opacity(0.4))
+                                        .lineLimit(1)
+                                }
+                            }
+                        case "user":
+                            // User message - prefix with "You:"
+                            HStack(spacing: 4) {
+                                Text("You:")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundColor(.white.opacity(0.5))
+                                if let msg = session.lastMessage {
+                                    Text(msg)
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.white.opacity(0.4))
+                                        .lineLimit(1)
+                                }
+                            }
+                        default:
+                            // Assistant message - just show text
                             if let msg = session.lastMessage {
                                 Text(msg)
                                     .font(.system(size: 11))
@@ -239,30 +250,26 @@ struct InstanceRow: View {
                                     .lineLimit(1)
                             }
                         }
-                    default:
-                        // Assistant message - just show text
-                        if let msg = session.lastMessage {
-                            Text(msg)
-                                .font(.system(size: 11))
-                                .foregroundColor(.white.opacity(0.4))
-                                .lineLimit(1)
-                        }
+                    } else if let lastMsg = session.lastMessage {
+                        Text(lastMsg)
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.4))
+                            .lineLimit(1)
+                    } else {
+                        // Fallback: show phase-based status when no other content
+                        Text(phaseStatusText)
+                            .font(.system(size: 11))
+                            .foregroundColor(.white.opacity(0.4))
+                            .lineLimit(1)
                     }
-                } else if let lastMsg = session.lastMessage {
-                    Text(lastMsg)
-                        .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.4))
-                        .lineLimit(1)
-                } else {
-                    // Fallback: show phase-based status when no other content
-                    Text(phaseStatusText)
-                        .font(.system(size: 11))
-                        .foregroundColor(.white.opacity(0.4))
-                        .lineLimit(1)
                 }
-            }
 
-            Spacer(minLength: 0)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) {
+                onChat()
+            }
 
             // Action icons or approval buttons
             if isWaitingForApproval && isInteractiveTool {
@@ -315,10 +322,6 @@ struct InstanceRow: View {
         .padding(.leading, 8)
         .padding(.trailing, 14)
         .padding(.vertical, 10)
-        .contentShape(Rectangle())
-        .onTapGesture(count: 2) {
-            onChat()
-        }
         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: isWaitingForApproval)
         .background(
             RoundedRectangle(cornerRadius: 12)
@@ -372,6 +375,9 @@ struct InlineApprovalButtons: View {
     @State private var showDenyButton = false
     @State private var showAllowButton = false
 
+    @State private var isDenyHovered = false
+    @State private var isAllowHovered = false
+
     var body: some View {
         HStack(spacing: 6) {
             // Chat button
@@ -389,12 +395,14 @@ struct InlineApprovalButtons: View {
                     .foregroundColor(.white.opacity(0.6))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.1))
+                    .background(Color.white.opacity(isDenyHovered ? 0.16 : 0.1))
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
+            .contentShape(Capsule())
             .opacity(showDenyButton ? 1 : 0)
-            .scaleEffect(showDenyButton ? 1 : 0.8)
+            .scaleEffect((showDenyButton ? 1 : 0.8) * (isDenyHovered ? 1.03 : 1.0))
+            .onHover { isDenyHovered = $0 }
 
             Button {
                 onApprove()
@@ -404,13 +412,17 @@ struct InlineApprovalButtons: View {
                     .foregroundColor(.black)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.9))
+                    .background(Color.white.opacity(isAllowHovered ? 1.0 : 0.9))
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
+            .contentShape(Capsule())
             .opacity(showAllowButton ? 1 : 0)
-            .scaleEffect(showAllowButton ? 1 : 0.8)
+            .scaleEffect((showAllowButton ? 1 : 0.8) * (isAllowHovered ? 1.04 : 1.0))
+            .onHover { isAllowHovered = $0 }
         }
+        .animation(.easeOut(duration: 0.12), value: isDenyHovered)
+        .animation(.easeOut(duration: 0.12), value: isAllowHovered)
         .onAppear {
             withAnimation(.spring(response: 0.3, dampingFraction: 0.7).delay(0.0)) {
                 showChatButton = true

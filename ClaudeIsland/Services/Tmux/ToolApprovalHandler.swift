@@ -17,6 +17,16 @@ actor ToolApprovalHandler {
 
     private init() {}
 
+    /// Press Enter in the target pane (used by interactive prompts like Trae/Coco)
+    func pressEnter(target: TmuxTarget) async -> Bool {
+        await sendNamedKey(to: target, key: "Enter")
+    }
+
+    /// Press Escape in the target pane (used to cancel prompts)
+    func pressEscape(target: TmuxTarget) async -> Bool {
+        await sendNamedKey(to: target, key: "Escape")
+    }
+
     /// Approve a tool once (sends '1' + Enter)
     func approveOnce(target: TmuxTarget) async -> Bool {
         await sendKeys(to: target, keys: "1", pressEnter: true)
@@ -73,6 +83,20 @@ actor ToolApprovalHandler {
             return true
         } catch {
             Self.logger.error("Error: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
+    private func sendNamedKey(to target: TmuxTarget, key: String) async -> Bool {
+        guard let tmuxPath = await TmuxPathFinder.shared.getTmuxPath() else {
+            return false
+        }
+        do {
+            _ = try await ProcessExecutor.shared.run(tmuxPath, arguments: [
+                "send-keys", "-t", target.targetString, key
+            ])
+            return true
+        } catch {
             return false
         }
     }

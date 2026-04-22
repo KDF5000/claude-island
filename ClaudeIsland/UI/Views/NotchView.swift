@@ -17,7 +17,7 @@ private let cornerRadiusInsets = (
 
 struct NotchView: View {
     @ObservedObject var viewModel: NotchViewModel
-    @StateObject private var sessionMonitor = ClaudeSessionMonitor()
+    @StateObject private var sessionMonitor = ClaudeSessionMonitor.shared
     @StateObject private var activityCoordinator = NotchActivityCoordinator.shared
     @ObservedObject private var updateManager = UpdateManager.shared
     @State private var previousPendingIds: Set<String> = []
@@ -189,7 +189,6 @@ struct NotchView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .preferredColorScheme(.dark)
         .onAppear {
-            sessionMonitor.startMonitoring()
             // On non-notched devices, keep visible so users have a target to interact with
             if !viewModel.hasPhysicalNotch {
                 isVisible = true

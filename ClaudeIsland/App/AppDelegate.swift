@@ -78,6 +78,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         HookInstaller.installIfNeeded()
 
+        // Start session monitoring globally
+        ClaudeSessionMonitor.shared.startMonitoring()
+
         // Start all available providers (including Coco/Trae CLI)
         Task {
             await ProviderRegistry.shared.startAll()

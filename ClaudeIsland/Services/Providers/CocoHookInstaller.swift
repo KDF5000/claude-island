@@ -71,66 +71,65 @@ struct CocoHookInstaller {
         let configPath = resolveConfigPath()
         var content = readConfigFile(at: configPath)
 
-        // Remove existing Coco Island hooks first
+        // 先删掉旧的 Coding Island hook，避免重复条目
         content = removeHooksFromContent(content)
 
-        // Build the hook entry (without the "hooks:" prefix)
+        // 构造新的 hook 块（不包含 "hooks:" 前缀）
         let python = detectPython()
         let command = "\(python) \(CocoPaths.hookScriptShellPath)"
-        let hookEntry = """
-          # Coding Island hook for Coco/Trae CLI (all events)
-          - type: command
-            command: \(command)
-            # Allow enough time for Island-driven permission decisions.
-            # The hook script will stop waiting early if the CLI proceeds.
-            timeout: 310s
-            matchers:
-              - event: user_prompt_submit
-              - event: pre_tool_use
-              - event: post_tool_use
-              - event: post_tool_use_failure
-              - event: permission_request
-              - event: notification
-              - event: stop
-              - event: subagent_start
-              - event: subagent_stop
-              - event: session_start
-              - event: session_end
-              - event: pre_compact
-              - event: post_compact
+        let hookBlock = """
+  # Coding Island hook for Coco/Trae CLI (all events)
+  - type: command
+    command: \(command)
+    # Allow enough time for Island-driven permission decisions.
+    # The hook script will stop waiting early if the CLI proceeds.
+    timeout: 310s
+    matchers:
+      - event: user_prompt_submit
+      - event: pre_tool_use
+      - event: post_tool_use
+      - event: post_tool_use_failure
+      - event: permission_request
+      - event: notification
+      - event: stop
+      - event: subagent_start
+      - event: subagent_stop
+      - event: session_start
+      - event: session_end
+      - event: pre_compact
+      - event: post_compact
 """
 
-        // Check if hooks section exists
-        if let hooksRange = content.range(of: "hooks:") {
-            // Find the end of hooks section (next top-level key or end of file)
-            let afterHooks = content[hooksRange.upperBound...]
-            var insertIndex = content.endIndex
+        // 如果已有 hooks: 段，直接整体替换该段，避免字符串定位出错导致 YAML 损坏
+        var lines = content.components(separatedBy: "\n")
+        if let hooksIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "hooks:" }) {
+            var endIndex = lines.count
 
-            // Find where to insert (after existing hooks, before next top-level key)
-            let lines = content[content.index(after: hooksRange.lowerBound)...].components(separatedBy: "\n")
-            var currentPos = hooksRange.upperBound
-            for line in lines {
-                // A new top-level key starts with a non-space character at the beginning of a line
-                if !line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("\t") && !line.hasPrefix("#") && !line.hasPrefix("-") {
-                    insertIndex = content.index(currentPos, offsetBy: -line.count - 1)
+            // 找到 hooks 段结束位置（下一个顶级 key，或者文件结束）
+            for i in (hooksIndex + 1)..<lines.count {
+                let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty,
+                   !lines[i].hasPrefix(" "),
+                   !lines[i].hasPrefix("\t"),
+                   !trimmed.hasPrefix("#") {
+                    endIndex = i
                     break
                 }
-                currentPos = content.index(currentPos, offsetBy: line.count + 1)
             }
 
-            if insertIndex == content.endIndex {
-                // Insert at the end
-                content += "\n" + hookEntry
-            } else {
-                // Insert before the next top-level key
-                content.insert(contentsOf: "\n" + hookEntry, at: insertIndex)
-            }
+            let beforeHooks = Array(lines[0...hooksIndex])
+            let afterHooks = endIndex < lines.count ? Array(lines[endIndex...]) : []
+
+            var newLines = beforeHooks
+            newLines.append(contentsOf: hookBlock.components(separatedBy: "\n"))
+            newLines.append(contentsOf: afterHooks)
+            content = newLines.joined(separator: "\n")
         } else {
-            // No hooks section, create one
+            // 没有 hooks:，在文件末尾新增一个 hooks 段
             if !content.isEmpty && !content.hasSuffix("\n") {
                 content += "\n"
             }
-            content += "\nhooks:\n" + hookEntry
+            content += "\n" + "hooks:\n" + hookBlock
         }
 
         // Ensure directory exists
@@ -170,7 +169,7 @@ struct CocoHookInstaller {
             return CocoPaths.altConfigFile
         }
 
-        // Default to ~/.config/coco/config.yaml
+        // Default to Trae CLI 路径（~/.trae/traecli.yaml）
         return CocoPaths.configFile
     }
 

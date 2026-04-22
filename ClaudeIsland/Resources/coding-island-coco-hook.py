@@ -17,8 +17,11 @@ SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
 # Overall budget for waiting on a permission decision from CodingIsland.
 # Note: Coco's hook config must have a timeout >= this value.
 TIMEOUT_SECONDS = 300  # 5 minutes (non-permission events)
-DUAL_APPROVAL_TIMEOUT = 3  # Short wait for fast Coding Island approval;
-                           # after timeout, CLI shows its own permission UI
+# How long the hook keeps the socket open waiting for the app to approve.
+# If this is too short, users often can't click the Island UI in time and the
+# CLI falls back to its own interactive prompt (which is hard to dismiss
+# reliably from the app without OS-level input injection).
+DUAL_APPROVAL_TIMEOUT = 12  # seconds
 PROVIDER_ID = "coco"
 
 
