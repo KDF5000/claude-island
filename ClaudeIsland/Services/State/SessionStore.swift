@@ -887,6 +887,30 @@ actor SessionStore {
             }
         }
 
+        // Coco can naturally finish a turn by writing `agent_end` into events.jsonl
+        // without emitting a final idle/waiting hook. In that case the process stays
+        // alive for the next prompt, but the UI would remain stuck in `.processing`.
+        let isCocoSession = session.providerId == "coco" || session.providerId == "coco-remote"
+        let hasPendingPermission = HookSocketServer.shared.hasPendingPermission(sessionId: payload.sessionId)
+        let hasRunningTool = session.chatItems.contains { item in
+            guard case .toolCall(let tool) = item.type else { return false }
+            return tool.status == .running
+        }
+        let hasWaitingApprovalTool = session.chatItems.contains { item in
+            guard case .toolCall(let tool) = item.type else { return false }
+            return tool.status == .waitingForApproval
+        }
+
+        if isCocoSession,
+           payload.sawAgentEnd,
+           session.phase == .processing,
+           !hasPendingPermission,
+           !hasRunningTool,
+           !hasWaitingApprovalTool,
+           session.phase.canTransition(to: .waitingForInput) {
+            session.phase = .waitingForInput
+        }
+
         sessions[payload.sessionId] = session
 
         await emitToolCompletionEvents(
@@ -1254,7 +1278,8 @@ actor SessionStore {
                 isIncremental: !result.clearDetected,
                 completedToolIds: result.completedToolIds,
                 toolResults: result.toolResults,
-                structuredResults: result.structuredResults
+                structuredResults: result.structuredResults,
+                sawAgentEnd: result.sawAgentEnd
             )
 
             await self?.process(.fileUpdated(payload))

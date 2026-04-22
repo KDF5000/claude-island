@@ -408,6 +408,7 @@ actor ConversationParser {
         let toolResults: [String: ToolResult]
         let structuredResults: [String: ToolResultData]
         let clearDetected: Bool
+        let sawAgentEnd: Bool
     }
 
     /// Parse only NEW messages since last call (efficient incremental updates)
@@ -422,12 +423,13 @@ actor ConversationParser {
                 completedToolIds: [],
                 toolResults: [:],
                 structuredResults: [:],
-                clearDetected: false
+                clearDetected: false,
+                sawAgentEnd: false
             )
         }
 
         var state = incrementalState[sessionId] ?? IncrementalParseState()
-        let newMessages = parseNewLines(filePath: sessionFile, state: &state)
+        let parseResult = parseNewLines(filePath: sessionFile, state: &state)
         let clearDetected = state.clearPending
         if clearDetected {
             state.clearPending = false
@@ -435,12 +437,13 @@ actor ConversationParser {
         incrementalState[sessionId] = state
 
         return IncrementalParseResult(
-            newMessages: newMessages,
+            newMessages: parseResult.messages,
             allMessages: state.messages,
             completedToolIds: state.completedToolIds,
             toolResults: state.toolResults,
             structuredResults: state.structuredResults,
-            clearDetected: clearDetected
+            clearDetected: clearDetected,
+            sawAgentEnd: parseResult.sawAgentEnd
         )
     }
 
@@ -455,10 +458,10 @@ actor ConversationParser {
     }
 
     /// Parse only new lines since last read (incremental)
-    private func parseNewLines(filePath: String, state: inout IncrementalParseState) -> [ChatMessage] {
+    private func parseNewLines(filePath: String, state: inout IncrementalParseState) -> (messages: [ChatMessage], sawAgentEnd: Bool) {
         guard let fileHandle = FileHandle(forReadingAtPath: filePath) else {
             Self.logger.warning("[Parser] Cannot open file: \(filePath, privacy: .public)")
-            return []
+            return ([], false)
         }
         defer { try? fileHandle.close() }
 
@@ -466,7 +469,7 @@ actor ConversationParser {
         do {
             fileSize = try fileHandle.seekToEnd()
         } catch {
-            return []
+            return ([], false)
         }
 
         let offsetCopy = state.lastFileOffset
@@ -479,24 +482,25 @@ actor ConversationParser {
 
         if fileSize == state.lastFileOffset {
             Self.logger.info("[Parser] No new bytes, returning empty")
-            return []
+            return ([], false)
         }
 
         do {
             try fileHandle.seek(toOffset: state.lastFileOffset)
         } catch {
-            return state.messages
+            return (state.messages, false)
         }
 
         guard let newData = try? fileHandle.readToEnd(),
               let newContent = String(data: newData, encoding: .utf8) else {
-            return state.messages
+            return (state.messages, false)
         }
 
         state.clearPending = false
         let isIncrementalRead = state.lastFileOffset > 0
         let lines = newContent.components(separatedBy: "\n")
         var newMessages: [ChatMessage] = []
+        var sawAgentEnd = false
 
         for line in lines where !line.isEmpty {
             if line.contains("<command-name>/clear</command-name>") {
@@ -619,6 +623,10 @@ actor ConversationParser {
             } else if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") || line.contains("\"agent_start\"") || line.contains("\"message\"") || line.contains("\"agent_end\"") {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
+                    if json["agent_end"] != nil {
+                        sawAgentEnd = true
+                    }
+
                     if let message = parseMessageLine(json, seenToolIds: &state.seenToolIds, seenAssistantMessageIds: &state.seenAssistantMessageIds, toolIdToName: &state.toolIdToName) {
                         
                         if let last = state.messages.last, last.role == message.role {
@@ -645,7 +653,7 @@ actor ConversationParser {
         let totalMessages = state.messages.count
         Self.logger.info("[Parser] Done: newMessages=\(newMessages.count) totalMessages=\(totalMessages)")
         state.lastFileOffset = fileSize
-        return newMessages
+        return (newMessages, sawAgentEnd)
     }
 
     /// Get set of completed tool IDs for a session

@@ -64,7 +64,8 @@ class ChatHistoryManager: ObservableObject {
             isIncremental: false,  // Full sync
             completedToolIds: completedTools,
             toolResults: toolResults,
-            structuredResults: structuredResults
+            structuredResults: structuredResults,
+            sawAgentEnd: false
         )
 
         await SessionStore.shared.process(.fileUpdated(payload))

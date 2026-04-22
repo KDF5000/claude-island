@@ -89,6 +89,7 @@ struct FileUpdatePayload: Sendable {
     let completedToolIds: Set<String>
     let toolResults: [String: ConversationParser.ToolResult]
     let structuredResults: [String: ToolResultData]
+    let sawAgentEnd: Bool
 }
 
 /// Result of a tool completion detected from JSONL
