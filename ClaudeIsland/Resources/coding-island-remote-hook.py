@@ -353,8 +353,15 @@ def main():
                 print(json.dumps(output))
                 sys.exit(0)
         
-        # We MUST print empty output so Coco doesn't block waiting for hook output
-        print("{}")
+        # No response (timeout) — explicitly return "ask" so both Claude and
+        # Coco fall back to their native approval UI.
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "decision": {"behavior": "ask"}
+            }
+        }
+        print(json.dumps(output))
         sys.exit(0)
         
     else:

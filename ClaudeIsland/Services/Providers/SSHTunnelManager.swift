@@ -1140,6 +1140,7 @@ def main():
             if decision == "allow":
                 output = {
                     "hookSpecificOutput": {
+                        "hookEventName": event,
                         "decision": {"behavior": "allow"}
                     }
                 }
@@ -1149,6 +1150,7 @@ def main():
             elif decision == "deny":
                 output = {
                     "hookSpecificOutput": {
+                        "hookEventName": event,
                         "decision": {
                             "behavior": "deny",
                             "message": reason or "Denied by user via CodingIsland"
@@ -1158,7 +1160,14 @@ def main():
                 print(json.dumps(output))
                 sys.exit(0)
         
-        # No response or "ask" - let the CLI show its normal UI
+        # No response or explicit "ask" - tell the CLI to show its native UI
+        output = {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "decision": {"behavior": "ask"}
+            }
+        }
+        print(json.dumps(output))
         sys.exit(0)
         
     else:
