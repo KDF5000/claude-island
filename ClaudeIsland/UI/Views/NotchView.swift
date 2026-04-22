@@ -22,12 +22,15 @@ struct NotchView: View {
     @ObservedObject private var updateManager = UpdateManager.shared
     @State private var previousPendingIds: Set<String> = []
     @State private var previousWaitingForInputIds: Set<String> = []
+    @State private var previousSessionPhases: [String: SessionPhase] = [:]
     @State private var waitingForInputTimestamps: [String: Date] = [:]  // sessionId -> when it entered waitingForInput
     @State private var isVisible: Bool = false
     @State private var isHovering: Bool = false
     @State private var isBouncing: Bool = false
 
     @Namespace private var activityNamespace
+
+    private let completionPromptDuration: TimeInterval = 2.5
 
     /// Whether any Claude session is currently processing or compacting
     private var isAnyProcessing: Bool {
@@ -54,6 +57,24 @@ struct NotchView: View {
         }
     }
 
+    private var completionPromptTitle: String? {
+        guard isShowingCompletionPrompt else { return nil }
+        return activityCoordinator.expandingActivity.title
+    }
+
+    private var completionPromptTitleWidth: CGFloat {
+        guard let title = completionPromptTitle, !title.isEmpty else { return 0 }
+
+        let measured = (title as NSString).size(withAttributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium)
+        ]).width
+        return min(max(measured, 80), 240)
+    }
+
+    private var completionPromptBodyWidth: CGFloat {
+        closedNotchSize.width - cornerRadiusInsets.closed.top + completionPromptTitleWidth + sideWidth
+    }
+
     // MARK: - Sizing
 
     private var closedNotchSize: CGSize {
@@ -74,6 +95,9 @@ struct NotchView: View {
             case .claude:
                 let baseWidth = 2 * max(0, closedNotchSize.height - 12) + 20
                 return baseWidth + permissionIndicatorWidth
+            case .completion:
+                let baseWidth = 2 * max(0, closedNotchSize.height - 12) + 20
+                return baseWidth + completionPromptTitleWidth
             case .none:
                 break
             }
@@ -193,6 +217,8 @@ struct NotchView: View {
             if !viewModel.hasPhysicalNotch {
                 isVisible = true
             }
+
+            seedTrackedSessionState(from: sessionMonitor.instances)
         }
         .onChange(of: viewModel.status) { oldStatus, newStatus in
             handleStatusChange(from: oldStatus, to: newStatus)
@@ -212,9 +238,15 @@ struct NotchView: View {
         activityCoordinator.expandingActivity.show && activityCoordinator.expandingActivity.type == .claude
     }
 
+    private var isShowingCompletionPrompt: Bool {
+        activityCoordinator.expandingActivity.show &&
+        activityCoordinator.expandingActivity.type == .completion &&
+        !(activityCoordinator.expandingActivity.title?.isEmpty ?? true)
+    }
+
     /// Whether to show the expanded closed state (processing, pending permission, or waiting for input)
     private var showClosedActivity: Bool {
-        isProcessing || hasPendingPermission || hasWaitingForInput
+        isProcessing || hasPendingPermission || hasWaitingForInput || isShowingCompletionPrompt
     }
 
     @ViewBuilder
@@ -270,6 +302,14 @@ struct NotchView: View {
                 Rectangle()
                     .fill(.clear)
                     .frame(width: closedNotchSize.width - 20)
+            } else if let completionTitle = completionPromptTitle {
+                NotchCompletionPromptView(
+                    title: completionTitle,
+                    titleWidth: completionPromptTitleWidth,
+                    contentWidth: completionPromptBodyWidth,
+                    indicatorWidth: sideWidth,
+                    namespace: activityNamespace
+                )
             } else {
                 // Closed with activity: black spacer (with optional bounce)
                 Rectangle()
@@ -284,7 +324,7 @@ struct NotchView: View {
                         .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
                         .frame(width: viewModel.status == .opened ? 20 : sideWidth)
                         .padding(.trailing, viewModel.status == .opened ? 0 : 4)
-                } else if hasWaitingForInput {
+                } else if hasWaitingForInput && !isShowingCompletionPrompt {
                     // Checkmark for waiting-for-input on the right side
                     ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
                         .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
@@ -379,8 +419,11 @@ struct NotchView: View {
 
     private func handleProcessingChange() {
         if isAnyProcessing || hasPendingPermission {
+            activityCoordinator.hideCompletionPromptIfNeeded()
             // Show claude activity when processing or waiting for permission
             activityCoordinator.showActivity(type: .claude)
+            isVisible = true
+        } else if isShowingCompletionPrompt {
             isVisible = true
         } else if hasWaitingForInput {
             // Keep visible for waiting-for-input but hide the processing spinner
@@ -414,7 +457,7 @@ struct NotchView: View {
             // Don't hide on non-notched devices - users need a visible target
             guard viewModel.hasPhysicalNotch else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                if viewModel.status == .closed && !isAnyProcessing && !hasPendingPermission && !hasWaitingForInput && !activityCoordinator.expandingActivity.show {
+                if viewModel.status == .closed && !isAnyProcessing && !hasPendingPermission && !hasWaitingForInput && !isShowingCompletionPrompt && !activityCoordinator.expandingActivity.show {
                     isVisible = false
                 }
             }
@@ -435,6 +478,25 @@ struct NotchView: View {
     }
 
     private func handleWaitingForInputChange(_ instances: [SessionState]) {
+        if let completion = NotchCompletionTransitionDetector.detect(
+            previousPhases: previousSessionPhases,
+            currentSessions: instances.map {
+                NotchCompletionTransitionDetector.Candidate(
+                    stableId: $0.stableId,
+                    phase: $0.phase,
+                    displayTitle: $0.displayTitle,
+                    lastActivity: $0.lastActivity
+                )
+            }
+        ), !isAnyProcessing, !hasPendingPermission {
+            activityCoordinator.showActivity(
+                type: .completion,
+                duration: completionPromptDuration,
+                title: completion.title
+            )
+            isVisible = true
+        }
+
         // Get sessions that are now waiting for input
         let waitingForInputSessions = instances.filter { $0.phase == .waitingForInput }
         let currentIds = Set(waitingForInputSessions.map { $0.stableId })
@@ -487,6 +549,16 @@ struct NotchView: View {
         }
 
         previousWaitingForInputIds = currentIds
+        previousSessionPhases = Dictionary(uniqueKeysWithValues: instances.map { ($0.stableId, $0.phase) })
+    }
+
+    private func seedTrackedSessionState(from instances: [SessionState]) {
+        previousWaitingForInputIds = Set(
+            instances
+                .filter { $0.phase == .waitingForInput }
+                .map(\.stableId)
+        )
+        previousSessionPhases = Dictionary(uniqueKeysWithValues: instances.map { ($0.stableId, $0.phase) })
     }
 
     /// Determine if notification sound should play for the given sessions
@@ -505,5 +577,38 @@ struct NotchView: View {
         }
 
         return false
+    }
+}
+
+struct NotchCompletionTransitionDetector {
+    struct Candidate: Equatable {
+        let stableId: String
+        let phase: SessionPhase
+        let displayTitle: String
+        let lastActivity: Date
+    }
+
+    struct Result: Equatable {
+        let stableId: String
+        let title: String
+    }
+
+    static func detect(
+        previousPhases: [String: SessionPhase],
+        currentSessions: [Candidate]
+    ) -> Result? {
+        let completedSessions = currentSessions.filter { session in
+            guard session.phase == .waitingForInput else { return false }
+            guard let previousPhase = previousPhases[session.stableId] else { return false }
+            return previousPhase == .processing || previousPhase == .compacting
+        }
+
+        guard let latestSession = completedSessions.max(by: { lhs, rhs in
+            lhs.lastActivity < rhs.lastActivity
+        }) else {
+            return nil
+        }
+
+        return Result(stableId: latestSession.stableId, title: latestSession.displayTitle)
     }
 }

@@ -13,6 +13,7 @@ import SwiftUI
 /// Types of activities that can be shown in the notch
 enum NotchActivityType: Equatable {
     case claude      // Claude is processing
+    case completion  // Session just completed
     case none
 }
 
@@ -23,8 +24,20 @@ struct ExpandingActivity: Equatable {
     var show: Bool = false
     var type: NotchActivityType = .none
     var value: CGFloat = 0
+    var title: String? = nil
+    var duration: TimeInterval = 0
 
     static let empty = ExpandingActivity()
+
+    static func completion(title: String, duration: TimeInterval) -> ExpandingActivity {
+        ExpandingActivity(
+            show: true,
+            type: .completion,
+            value: 0,
+            title: title,
+            duration: duration
+        )
+    }
 }
 
 // MARK: - Coordinator
@@ -62,7 +75,8 @@ class NotchActivityCoordinator: ObservableObject {
     func showActivity(
         type: NotchActivityType,
         value: CGFloat = 0,
-        duration: TimeInterval = 0
+        duration: TimeInterval = 0,
+        title: String? = nil
     ) {
         activityDuration = duration
 
@@ -70,7 +84,9 @@ class NotchActivityCoordinator: ObservableObject {
             expandingActivity = ExpandingActivity(
                 show: true,
                 type: type,
-                value: value
+                value: value,
+                title: title,
+                duration: duration
             )
         }
     }
@@ -80,6 +96,12 @@ class NotchActivityCoordinator: ObservableObject {
         withAnimation(.smooth) {
             expandingActivity = .empty
         }
+    }
+
+    /// Hide the current activity only if it's the transient completion prompt.
+    func hideCompletionPromptIfNeeded() {
+        guard expandingActivity.show, expandingActivity.type == .completion else { return }
+        hideActivity()
     }
 
     /// Toggle activity visibility

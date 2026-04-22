@@ -170,3 +170,29 @@ struct ReadyForInputIndicatorIcon: View {
     }
 }
 
+struct NotchCompletionPromptView: View {
+    let title: String
+    let titleWidth: CGFloat
+    let contentWidth: CGFloat
+    let indicatorWidth: CGFloat
+    let namespace: Namespace.ID
+
+    var body: some View {
+        HStack(spacing: 0) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: titleWidth, alignment: .leading)
+
+            Spacer(minLength: 0)
+
+            ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
+                .matchedGeometryEffect(id: "spinner", in: namespace, isSource: true)
+                .frame(width: indicatorWidth)
+                .padding(.trailing, 4)
+        }
+        .frame(width: contentWidth)
+    }
+}
