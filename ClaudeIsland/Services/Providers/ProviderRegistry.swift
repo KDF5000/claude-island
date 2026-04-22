@@ -80,11 +80,6 @@ class ProviderRegistry: ObservableObject {
             return
         }
 
-        // Install hooks if not already installed
-        if !provider.isHookInstalled {
-            await provider.installHooks()
-        }
-
         // Start monitoring
         await provider.start()
 

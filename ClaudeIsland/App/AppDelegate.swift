@@ -88,17 +88,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Auto-connect Remote SSH tunnel if configured.
         Task {
-            let host = AppSettings.remoteSSHHost
-            guard AppSettings.remoteSSHEnabled,
-                  !host.isEmpty,
-                  SSHTunnelManager.shared.isTunnelSupported
-            else { return }
+            guard SSHTunnelManager.shared.isTunnelSupported else { return }
 
-            let user = AppSettings.remoteSSHUser.isEmpty ? nil : AppSettings.remoteSSHUser
-            let port = AppSettings.remoteSSHPort
-            let tunnelPort = AppSettings.remoteSSHTunnelPort
-            await SSHTunnelManager.shared.removeTunnels(host: host, user: user, sshPort: port, remotePort: tunnelPort, localPort: SSHTunnelManager.defaultPort)
-            _ = await SSHTunnelManager.shared.createTCPTunnel(host: host, user: user, sshPort: port, remotePort: tunnelPort, localPort: SSHTunnelManager.defaultPort)
+            for remote in AppSettings.remoteMachines where remote.isEnabled {
+                let normalized = normalizeRemoteSSHIdentity(host: remote.host, user: remote.user)
+                guard !normalized.host.isEmpty else { continue }
+
+                await SSHTunnelManager.shared.removeTunnels(
+                    host: normalized.host,
+                    user: normalized.user,
+                    sshPort: remote.sshPort,
+                    remotePort: remote.remotePort,
+                    localPort: SSHTunnelManager.defaultPort
+                )
+
+                _ = await SSHTunnelManager.shared.createTCPTunnel(
+                    host: normalized.host,
+                    user: normalized.user,
+                    sshPort: remote.sshPort,
+                    remotePort: remote.remotePort,
+                    localPort: SSHTunnelManager.defaultPort
+                )
+            }
         }
 
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -292,9 +303,8 @@ final class SettingsWindowModel: ObservableObject {
 enum SettingsSection: String, CaseIterable, Identifiable {
     case appearance
     case notifications
-    case paths
-    case remote
-    case system
+    case systems
+    case hooks
     case about
 
     var id: String { rawValue }
@@ -303,9 +313,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .appearance: return "Appearance"
         case .notifications: return "Notifications"
-        case .paths: return "Paths"
-        case .remote: return "Remote"
-        case .system: return "System"
+        case .systems: return "Systems"
+        case .hooks: return "Hooks"
         case .about: return "About"
         }
     }
@@ -314,9 +323,8 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         switch self {
         case .appearance: return "paintbrush"
         case .notifications: return "bell"
-        case .paths: return "folder"
-        case .remote: return "network"
-        case .system: return "gearshape"
+        case .systems: return "server.rack"
+        case .hooks: return "point.3.connected.trianglepath.dotted"
         case .about: return "info.circle"
         }
     }
@@ -365,7 +373,7 @@ private struct SettingsSidebarView: View {
     @Binding var selection: SettingsSection?
 
     private var generalSections: [SettingsSection] {
-        [.appearance, .notifications, .paths, .remote, .system]
+        [.appearance, .notifications, .systems, .hooks]
     }
 
     private var infoSections: [SettingsSection] {
@@ -489,12 +497,10 @@ private struct SettingsDetailView: View {
                 AppearanceSettingsView(screenSelector: screenSelector)
             case .notifications:
                 NotificationSettingsView()
-            case .paths:
-                PathsSettingsView()
-            case .remote:
-                RemoteSettingsView(tunnelManager: sshTunnelManager)
-            case .system:
-                SystemSettingsView()
+            case .systems:
+                SystemsSettingsView()
+            case .hooks:
+                HooksSettingsView(tunnelManager: sshTunnelManager)
             case .about:
                 AboutSettingsView(updateManager: updateManager)
             case .none:
@@ -725,6 +731,992 @@ private struct NotificationSettingsView: View {
     }
 }
 
+private struct NormalizedRemoteSSHIdentity {
+    let host: String
+    let user: String?
+}
+
+private func normalizeRemoteSSHIdentity(host: String, user: String) -> NormalizedRemoteSSHIdentity {
+    let hostTrim = host.trimmingCharacters(in: .whitespacesAndNewlines)
+    let userTrim = user.trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if userTrim.isEmpty,
+       let at = hostTrim.firstIndex(of: "@"),
+       hostTrim.firstIndex(of: " ") == nil {
+        let parsedUser = String(hostTrim[..<at])
+        let parsedHost = String(hostTrim[hostTrim.index(after: at)...])
+        if !parsedUser.isEmpty, !parsedHost.isEmpty {
+            return NormalizedRemoteSSHIdentity(host: parsedHost, user: parsedUser)
+        }
+    }
+
+    return NormalizedRemoteSSHIdentity(host: hostTrim, user: userTrim.isEmpty ? nil : userTrim)
+}
+
+private func shortenedSettingsPath(_ path: String) -> String {
+    let home = NSHomeDirectory()
+    if path.hasPrefix(home) {
+        return "~" + path.dropFirst(home.count)
+    }
+    return path
+}
+
+private struct SystemsSettingsView: View {
+    @State private var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
+
+    var body: some View {
+        SettingsPage(title: "Systems") {
+            SettingsSectionTitle(title: "Local Paths")
+            SettingsCard {
+                SettingsRow("Claude Config") {
+                    Text(shortenedSettingsPath(ClaudePaths.claudeDir.path))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                SettingsCardDivider()
+                SettingsRow("Claude Projects") {
+                    Text(shortenedSettingsPath(ClaudePaths.projectsDir.path))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                SettingsCardDivider()
+                SettingsRow("Island Root") {
+                    Text(shortenedSettingsPath(IslandPaths.rootDir.path))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                SettingsCardDivider()
+                SettingsRow("Socket") {
+                    Text(shortenedSettingsPath(IslandPaths.socketPath))
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            }
+
+            Spacer().frame(height: 12)
+
+            SettingsSectionTitle(title: "System")
+            SettingsCard {
+                SettingsRow("Launch at Login") {
+                    Toggle("", isOn: $launchAtLogin)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .onChange(of: launchAtLogin) { _, newValue in
+                            do {
+                                if newValue {
+                                    try SMAppService.mainApp.register()
+                                } else {
+                                    try SMAppService.mainApp.unregister()
+                                }
+                            } catch {
+                                launchAtLogin = SMAppService.mainApp.status == .enabled
+                                print("Failed to toggle launch at login: \(error)")
+                            }
+                        }
+                }
+            }
+
+            Spacer().frame(height: 12)
+
+            SettingsSectionTitle(title: "Accessibility")
+            SettingsCard {
+                SettingsRow(AXIsProcessTrusted() ? "Enabled" : "Disabled") {
+                    if !AXIsProcessTrusted() {
+                        Button("Open System Settings") {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear {
+            launchAtLogin = SMAppService.mainApp.status == .enabled
+        }
+    }
+}
+
+private struct RemoteMachinesSettingsSection: View {
+    @Binding var remoteMachines: [RemoteMachineSettings]
+    @ObservedObject var tunnelManager: SSHTunnelManager
+
+    var body: some View {
+        HStack {
+            SettingsSectionTitle(title: "Remote Machines")
+            Spacer(minLength: 0)
+            Button("Add Machine") {
+                addRemoteMachine()
+            }
+        }
+        .padding(.horizontal, 6)
+
+        if remoteMachines.isEmpty {
+            SettingsCard {
+                SettingsRow("No remote machines", subtitle: "Add a machine to monitor remote tunnel status and install remote hooks.") {
+                    Button("Add Machine") {
+                        addRemoteMachine()
+                    }
+                }
+            }
+        } else {
+            SettingsCard {
+                ForEach($remoteMachines) { $machine in
+                    RemoteMachineSettingsCard(
+                        machine: $machine,
+                        tunnelManager: tunnelManager,
+                        onRemove: {
+                            removeRemoteMachine(id: machine.id)
+                        }
+                    )
+
+                    if machine.id != remoteMachines.last?.id {
+                        SettingsCardDivider()
+                    }
+                }
+            }
+        }
+    }
+
+    private func addRemoteMachine() {
+        remoteMachines.append(
+            RemoteMachineSettings(name: "Remote \(remoteMachines.count + 1)")
+        )
+    }
+
+    private func removeRemoteMachine(id: String) {
+        guard let index = remoteMachines.firstIndex(where: { $0.id == id }) else { return }
+        let machine = remoteMachines[index]
+        let normalized = normalizeRemoteSSHIdentity(host: machine.host, user: machine.user)
+
+        if !normalized.host.isEmpty {
+            Task {
+                await tunnelManager.removeTunnels(
+                    host: normalized.host,
+                    user: normalized.user,
+                    sshPort: machine.sshPort,
+                    remotePort: machine.remotePort,
+                    localPort: SSHTunnelManager.defaultPort
+                )
+            }
+        }
+
+        remoteMachines.remove(at: index)
+    }
+}
+
+private struct RemoteMachineSettingsCard: View {
+    @Binding var machine: RemoteMachineSettings
+    @ObservedObject var tunnelManager: SSHTunnelManager
+
+    let onRemove: () -> Void
+
+    private struct MachineConnectionIdentity: Equatable {
+        let host: String
+        let user: String?
+        let sshPort: Int
+        let remotePort: Int
+    }
+
+    private enum RemoteHookState: Equatable {
+        case unknown
+        case checking
+        case installed
+        case notInstalled
+        case unavailable(String)
+    }
+
+    @State private var isExpanded: Bool = false
+    @State private var isEditing: Bool = false
+    @State private var draftMachine: RemoteMachineSettings? = nil
+    @State private var isWorking: Bool = false
+    @State private var statusText: String? = nil
+    @State private var errorText: String? = nil
+    @State private var remoteHookState: RemoteHookState = .unknown
+
+    private var normalizedIdentity: NormalizedRemoteSSHIdentity {
+        normalizeRemoteSSHIdentity(host: machine.host, user: machine.user)
+    }
+
+    private var isConnected: Bool {
+        guard !normalizedIdentity.host.isEmpty else { return false }
+        return tunnelManager.isTCPTunnelActive(
+            host: normalizedIdentity.host,
+            user: normalizedIdentity.user,
+            sshPort: machine.sshPort,
+            remotePort: machine.remotePort,
+            localPort: SSHTunnelManager.defaultPort
+        )
+    }
+
+    private var titleText: String {
+        let trimmedName = machine.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedName.isEmpty {
+            return trimmedName
+        }
+        if !normalizedIdentity.host.isEmpty {
+            return normalizedIdentity.host
+        }
+        return "Remote Machine"
+    }
+
+    private var stateLabel: String {
+        if isConnected { return "Connected" }
+        if machine.isEnabled { return "Auto-connect enabled" }
+        return "Idle"
+    }
+
+    private var statusColor: Color {
+        if isConnected { return .green }
+        if machine.isEnabled { return .orange }
+        return .secondary.opacity(0.6)
+    }
+
+    private var summaryHostText: String {
+        let host = normalizedIdentity.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        return host.isEmpty ? "Host not configured" : host
+    }
+
+    private var displayUserText: String {
+        let user = normalizedIdentity.user?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return user.isEmpty ? "Default SSH user" : user
+    }
+
+    private var displayAutoConnectText: String {
+        machine.isEnabled ? "Enabled" : "Disabled"
+    }
+
+    private var displayedErrorText: String? {
+        errorText
+    }
+
+    private var remoteHookLabel: String {
+        switch remoteHookState {
+        case .unknown:
+            return normalizedIdentity.host.isEmpty ? "Host not configured" : "Not checked"
+        case .checking:
+            return "Checking…"
+        case .installed:
+            return "Installed"
+        case .notInstalled:
+            return "Not Installed"
+        case .unavailable:
+            return "Unavailable"
+        }
+    }
+
+    private var remoteHookColor: Color {
+        switch remoteHookState {
+        case .installed:
+            return .green
+        case .checking:
+            return .orange
+        case .notInstalled, .unknown:
+            return .secondary.opacity(0.6)
+        case .unavailable:
+            return .red
+        }
+    }
+
+    private var remoteHookSubtitle: String? {
+        switch remoteHookState {
+        case .unknown:
+            return normalizedIdentity.host.isEmpty ? "Configure the host before checking the remote hook." : nil
+        case .checking, .installed, .notInstalled:
+            return nil
+        case .unavailable(let message):
+            return message
+        }
+    }
+
+    private var remoteHookActionTitle: String {
+        remoteHookState == .installed ? "Reinstall Remote Hook" : "Install Remote Hook"
+    }
+
+    private func draftBinding<Value>(_ keyPath: WritableKeyPath<RemoteMachineSettings, Value>) -> Binding<Value> {
+        Binding(
+            get: {
+                draftMachine?[keyPath: keyPath] ?? machine[keyPath: keyPath]
+            },
+            set: { newValue in
+                if draftMachine == nil {
+                    draftMachine = machine
+                }
+                draftMachine?[keyPath: keyPath] = newValue
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func readOnlyValue(_ text: String, monospaced: Bool = false, placeholder: Bool = false) -> some View {
+        Text(text)
+            .font(.system(size: 12, design: monospaced ? .monospaced : .default))
+            .foregroundStyle(placeholder ? .tertiary : .secondary)
+            .multilineTextAlignment(.trailing)
+            .textSelection(.enabled)
+            .frame(maxWidth: 320, alignment: .trailing)
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(titleText)
+                        .font(.system(size: 14, weight: .semibold))
+
+                    Text(summaryHostText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 12)
+
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 8, height: 8)
+
+                    Text(stateLabel)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                if isWorking {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                Button {
+                    let willExpand = !isExpanded
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        if isExpanded {
+                            cancelEditing()
+                            remoteHookState = .unknown
+                        }
+                        isExpanded.toggle()
+                    }
+
+                    if willExpand {
+                        Task {
+                            await refreshRemoteHookStatus(force: true)
+                        }
+                    }
+                } label: {
+                    Image(systemName: isExpanded ? "info.circle.fill" : "info.circle")
+                        .font(.system(size: 17, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(isExpanded ? "隐藏\(titleText)详情" : "显示\(titleText)详情")
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+
+            if isExpanded {
+                SettingsCardDivider()
+                SettingsRow("Name") {
+                    if isEditing {
+                        TextField("Remote machine", text: draftBinding(\.name))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 320)
+                    } else {
+                        readOnlyValue(titleText)
+                    }
+                }
+                SettingsCardDivider()
+                SettingsRow("Host") {
+                    if isEditing {
+                        TextField("example.com", text: draftBinding(\.host))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 320)
+                    } else {
+                        readOnlyValue(summaryHostText, monospaced: true, placeholder: normalizedIdentity.host.isEmpty)
+                    }
+                }
+                SettingsCardDivider()
+                SettingsRow("User", subtitle: "optional") {
+                    if isEditing {
+                        TextField("", text: draftBinding(\.user))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 320)
+                    } else {
+                        readOnlyValue(displayUserText, monospaced: true, placeholder: normalizedIdentity.user == nil)
+                    }
+                }
+                SettingsCardDivider()
+                SettingsRow("SSH Port") {
+                    if isEditing {
+                        TextField("", value: draftBinding(\.sshPort), formatter: SettingsNumberFormatters.port)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 140)
+                    } else {
+                        readOnlyValue("\(machine.sshPort)", monospaced: true)
+                    }
+                }
+                SettingsCardDivider()
+                SettingsRow("Remote Port", subtitle: "Remote listen port for ssh -R") {
+                    if isEditing {
+                        TextField("", value: draftBinding(\.remotePort), formatter: SettingsNumberFormatters.port)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 140)
+                    } else {
+                        readOnlyValue("\(machine.remotePort)", monospaced: true)
+                    }
+                }
+                SettingsCardDivider()
+                SettingsRow("Auto-connect", subtitle: "Reconnect this machine when the app launches.") {
+                    if isEditing {
+                        Toggle("", isOn: draftBinding(\.isEnabled))
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                    } else {
+                        readOnlyValue(displayAutoConnectText)
+                    }
+                }
+                SettingsCardDivider()
+                SettingsRow("Status") {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(statusColor)
+                            .frame(width: 8, height: 8)
+                        Text(stateLabel)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                SettingsCardDivider()
+                SettingsRow("Remote Hook") {
+                    HStack(spacing: 8) {
+                        Circle()
+                            .fill(remoteHookColor)
+                            .frame(width: 8, height: 8)
+                        Text(remoteHookLabel)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let remoteHookSubtitle {
+                    SettingsCardDivider()
+                    SettingsRow("Remote Hook Details", subtitle: remoteHookSubtitle) {
+                        EmptyView()
+                    }
+                }
+                SettingsCardDivider()
+                SettingsRow("Actions") {
+                    HStack(spacing: 10) {
+                        if isWorking {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+
+                        if isEditing {
+                            Button("Cancel") {
+                                withAnimation(.easeInOut(duration: 0.18)) {
+                                    cancelEditing()
+                                }
+                            }
+                            .disabled(isWorking)
+
+                            Button("Save") {
+                                Task {
+                                    await saveEdits()
+                                }
+                            }
+                            .disabled(isWorking)
+                        } else {
+                            Button("Edit") {
+                                withAnimation(.easeInOut(duration: 0.18)) {
+                                    beginEditing()
+                                }
+                            }
+                            .disabled(isWorking)
+                        }
+
+                        Button(isConnected ? "Disconnect" : "Connect") {
+                            Task {
+                                await toggleConnection()
+                            }
+                        }
+                        .disabled(isWorking || normalizedIdentity.host.isEmpty || isEditing)
+
+                        Button(remoteHookActionTitle) {
+                            Task {
+                                await installRemoteHook()
+                            }
+                        }
+                        .disabled(isWorking || normalizedIdentity.host.isEmpty || isEditing)
+
+                        Button("Remove") {
+                            onRemove()
+                        }
+                        .foregroundStyle(.red)
+                        .disabled(isWorking || isEditing)
+                    }
+                }
+
+                if let statusText {
+                    SettingsCardDivider()
+                    SettingsRow("Last Action", subtitle: statusText) {
+                        EmptyView()
+                    }
+                }
+
+                if let error = displayedErrorText {
+                    SettingsCardDivider()
+                    SettingsRow("Error") {
+                        Text(error)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                            .textSelection(.enabled)
+                            .frame(maxWidth: 420, alignment: .leading)
+                    }
+                }
+            }
+        }
+        .animation(.easeInOut(duration: 0.18), value: isExpanded)
+        .onAppear {
+            if isExpanded {
+                Task {
+                    await refreshRemoteHookStatus(force: false)
+                }
+            }
+        }
+        .onChange(of: machine.isEnabled) { _, newValue in
+            if !newValue && isConnected {
+                Task {
+                    await disconnect()
+                }
+            }
+        }
+        .onChange(of: machine.host) { _, _ in
+            remoteHookState = .unknown
+        }
+        .onChange(of: machine.user) { _, _ in
+            remoteHookState = .unknown
+        }
+        .onChange(of: machine.sshPort) { _, _ in
+            remoteHookState = .unknown
+        }
+    }
+
+    private func beginEditing() {
+        draftMachine = machine
+        isEditing = true
+    }
+
+    private func cancelEditing() {
+        draftMachine = nil
+        isEditing = false
+    }
+
+    private func normalizeMachine(_ value: RemoteMachineSettings) -> RemoteMachineSettings {
+        var normalized = value
+        let identity = normalizeRemoteSSHIdentity(host: normalized.host, user: normalized.user)
+        normalized.host = identity.host
+        normalized.user = identity.user ?? ""
+        normalized.name = normalized.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return normalized
+    }
+
+    private func connectionIdentity(for settings: RemoteMachineSettings) -> MachineConnectionIdentity {
+        let identity = normalizeRemoteSSHIdentity(host: settings.host, user: settings.user)
+        return MachineConnectionIdentity(
+            host: identity.host,
+            user: identity.user,
+            sshPort: settings.sshPort,
+            remotePort: settings.remotePort
+        )
+    }
+
+    private func isTunnelActive(for settings: RemoteMachineSettings) -> Bool {
+        let identity = connectionIdentity(for: settings)
+        guard !identity.host.isEmpty else { return false }
+        return tunnelManager.isTCPTunnelActive(
+            host: identity.host,
+            user: identity.user,
+            sshPort: identity.sshPort,
+            remotePort: identity.remotePort,
+            localPort: SSHTunnelManager.defaultPort
+        )
+    }
+
+    private func saveEdits() async {
+        guard let draftMachine else {
+            cancelEditing()
+            return
+        }
+
+        let previousMachine = machine
+        let updatedMachine = normalizeMachine(draftMachine)
+        let previousIdentity = connectionIdentity(for: previousMachine)
+        let updatedIdentity = connectionIdentity(for: updatedMachine)
+        let wasConnected = isTunnelActive(for: previousMachine)
+        let connectionIdentityChanged = previousIdentity != updatedIdentity
+
+        machine = updatedMachine
+        self.draftMachine = nil
+        isEditing = false
+        errorText = nil
+        remoteHookState = .unknown
+
+        guard wasConnected, connectionIdentityChanged, !previousIdentity.host.isEmpty else {
+            statusText = "Settings saved"
+            if isExpanded {
+                await refreshRemoteHookStatus(force: false)
+            }
+            return
+        }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        statusText = "Updating connection…"
+        await tunnelManager.removeTunnels(
+            host: previousIdentity.host,
+            user: previousIdentity.user,
+            sshPort: previousIdentity.sshPort,
+            remotePort: previousIdentity.remotePort,
+            localPort: SSHTunnelManager.defaultPort
+        )
+        statusText = "Connection settings changed. Reconnect to apply the new address."
+        if isExpanded {
+            await refreshRemoteHookStatus(force: false)
+        }
+    }
+
+    private func persistNormalizedIdentity() {
+        machine = normalizeMachine(machine)
+    }
+
+    private func toggleConnection() async {
+        errorText = nil
+        statusText = nil
+        if isConnected {
+            await disconnect()
+        } else {
+            await connect()
+        }
+    }
+
+    private func connect() async {
+        persistNormalizedIdentity()
+
+        guard !normalizedIdentity.host.isEmpty else { return }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        statusText = "Connecting…"
+        await tunnelManager.removeTunnels(
+            host: normalizedIdentity.host,
+            user: normalizedIdentity.user,
+            sshPort: machine.sshPort,
+            remotePort: machine.remotePort,
+            localPort: SSHTunnelManager.defaultPort
+        )
+
+        let tunnel = await tunnelManager.createTCPTunnel(
+            host: normalizedIdentity.host,
+            user: normalizedIdentity.user,
+            sshPort: machine.sshPort,
+            remotePort: machine.remotePort,
+            localPort: SSHTunnelManager.defaultPort
+        )
+
+        if tunnel != nil {
+            statusText = "Connected to \(normalizedIdentity.host)"
+        } else {
+            statusText = "Failed to connect"
+            errorText = tunnelManager.lastErrorMessage
+        }
+    }
+
+    private func disconnect() async {
+        persistNormalizedIdentity()
+
+        guard !normalizedIdentity.host.isEmpty else { return }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        statusText = "Disconnecting…"
+        await tunnelManager.removeTunnels(
+            host: normalizedIdentity.host,
+            user: normalizedIdentity.user,
+            sshPort: machine.sshPort,
+            remotePort: machine.remotePort,
+            localPort: SSHTunnelManager.defaultPort
+        )
+        statusText = "Disconnected"
+    }
+
+    private func installRemoteHook() async {
+        persistNormalizedIdentity()
+
+        guard !normalizedIdentity.host.isEmpty else { return }
+
+        isWorking = true
+        defer { isWorking = false }
+
+        statusText = "Installing remote hook…"
+        errorText = nil
+
+        let result = await tunnelManager.installRemoteHook(
+            host: normalizedIdentity.host,
+            user: normalizedIdentity.user,
+            sshPort: machine.sshPort,
+            tcpPort: machine.remotePort,
+            localPort: SSHTunnelManager.defaultPort
+        )
+
+        switch result {
+        case .success:
+            statusText = "Remote hook installed"
+            remoteHookState = .installed
+        case .failure(let error):
+            statusText = "Failed to install remote hook"
+            errorText = error.localizedDescription
+            remoteHookState = .unavailable(error.localizedDescription)
+        }
+    }
+
+    private func refreshRemoteHookStatus(force: Bool) async {
+        guard !normalizedIdentity.host.isEmpty else {
+            remoteHookState = .unknown
+            return
+        }
+
+        if !force, case .installed = remoteHookState {
+            return
+        }
+
+        remoteHookState = .checking
+        let result = await tunnelManager.isRemoteHookInstalled(
+            host: normalizedIdentity.host,
+            user: normalizedIdentity.user,
+            sshPort: machine.sshPort
+        )
+
+        switch result {
+        case .success(let installed):
+            remoteHookState = installed ? .installed : .notInstalled
+        case .failure(let error):
+            remoteHookState = .unavailable(error.localizedDescription)
+        }
+    }
+}
+
+private struct HooksSettingsView: View {
+    @ObservedObject private var providerRegistry = ProviderRegistry.shared
+    @ObservedObject var tunnelManager: SSHTunnelManager
+
+    @State private var expandedProviderIds: Set<String> = []
+    @State private var workingProviderIds: Set<String> = []
+    @State private var actionMessages: [String: String] = [:]
+    @State private var remoteMachines: [RemoteMachineSettings] = AppSettings.remoteMachines
+
+    private var providers: [ProviderInfo] {
+        providerRegistry.registeredFactories.values
+            .map { $0.providerInfo }
+            .sorted {
+                $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+            }
+    }
+
+    var body: some View {
+        SettingsPage(title: "Hooks") {
+            SettingsSectionTitle(title: "Providers")
+
+            SettingsCard {
+                ForEach(providers, id: \.id) { info in
+                    HStack(alignment: .center, spacing: 12) {
+                        Text(info.displayName)
+                            .font(.system(size: 14, weight: .semibold))
+
+                        Spacer(minLength: 12)
+
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(hookStatusColor(for: info.id))
+                                .frame(width: 8, height: 8)
+
+                            Text(hookStatusLabel(for: info.id))
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if workingProviderIds.contains(info.id) {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.18)) {
+                                toggleProviderDetails(info.id)
+                            }
+                        } label: {
+                            Image(systemName: expandedProviderIds.contains(info.id) ? "info.circle.fill" : "info.circle")
+                                .font(.system(size: 17, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 28, height: 28)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(expandedProviderIds.contains(info.id) ? "隐藏\(info.displayName)详情" : "显示\(info.displayName)详情")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+
+                    if expandedProviderIds.contains(info.id) {
+                        SettingsCardDivider()
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(availabilitySubtitle(for: info.id))
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+
+                            HStack(spacing: 10) {
+                                Button(isInstalled(for: info.id) ? "Reinstall" : "Install") {
+                                    Task {
+                                        await runHookAction(providerId: info.id, install: true)
+                                    }
+                                }
+                                .disabled(workingProviderIds.contains(info.id) || isProviderUnavailable(info.id))
+
+                                Button("Uninstall") {
+                                    Task {
+                                        await runHookAction(providerId: info.id, install: false)
+                                    }
+                                }
+                                .disabled(workingProviderIds.contains(info.id) || !isInstalled(for: info.id))
+
+                                Spacer(minLength: 0)
+                            }
+
+                            if let message = actionMessages[info.id] {
+                                Text(message)
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+
+                            if isProviderUnavailable(info.id) {
+                                Text("Provider 不可用时无法安装 hooks。请先确认本机已安装对应 CLI。")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.tertiary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                    }
+
+                    if info.id != providers.last?.id {
+                        SettingsCardDivider()
+                    }
+                }
+            }
+
+            Spacer().frame(height: 12)
+
+            RemoteMachinesSettingsSection(
+                remoteMachines: $remoteMachines,
+                tunnelManager: tunnelManager
+            )
+        }
+        .onAppear {
+            remoteMachines = AppSettings.remoteMachines
+        }
+        .onChange(of: remoteMachines) { _, newValue in
+            AppSettings.remoteMachines = newValue
+        }
+    }
+
+    private func provider(for providerId: String) -> AgentProvider? {
+        if let provider = providerRegistry.activeProviders[providerId] {
+            return provider
+        }
+        return providerRegistry.registeredFactories[providerId]?.create()
+    }
+
+    private func isInstalled(for providerId: String) -> Bool {
+        provider(for: providerId)?.isHookInstalled ?? false
+    }
+
+    private func availabilitySubtitle(for providerId: String) -> String {
+        if providerRegistry.activeProviders[providerId] != nil {
+            return "Provider is active and ready to receive hook events."
+        }
+        guard let available = providerRegistry.providerAvailability[providerId] else {
+            return "Waiting for provider startup detection."
+        }
+        return available
+            ? "CLI detected. You can install or reinstall hooks."
+            : "CLI not detected on this machine."
+    }
+
+    private func hookStatusLabel(for providerId: String) -> String {
+        if isInstalled(for: providerId) {
+            return "Installed"
+        }
+        if providerRegistry.providerAvailability[providerId] == nil {
+            return "Checking…"
+        }
+        if isProviderUnavailable(providerId) {
+            return "Unavailable"
+        }
+        return "Not Installed"
+    }
+
+    private func hookStatusColor(for providerId: String) -> Color {
+        isInstalled(for: providerId) ? .green : .secondary
+    }
+
+    private func isProviderUnavailable(_ providerId: String) -> Bool {
+        if providerRegistry.activeProviders[providerId] != nil {
+            return false
+        }
+        return providerRegistry.providerAvailability[providerId] == false
+    }
+
+    private func toggleProviderDetails(_ providerId: String) {
+        if expandedProviderIds.contains(providerId) {
+            expandedProviderIds.remove(providerId)
+        } else {
+            expandedProviderIds.insert(providerId)
+        }
+    }
+
+    private func runHookAction(providerId: String, install: Bool) async {
+        guard let provider = provider(for: providerId) else {
+            actionMessages[providerId] = "Provider is not registered."
+            return
+        }
+
+        workingProviderIds.insert(providerId)
+        defer { workingProviderIds.remove(providerId) }
+
+        if install {
+            await provider.installHooks()
+            actionMessages[providerId] = provider.isHookInstalled ? "Hooks installed." : "Install finished. Verify provider config if hooks still show as missing."
+        } else {
+            await provider.uninstallHooks()
+            actionMessages[providerId] = provider.isHookInstalled ? "Uninstall finished, but hooks still appear present." : "Hooks removed."
+        }
+    }
+}
+
 private struct PathsSettingsView: View {
     var body: some View {
         SettingsPage(title: "Paths") {
@@ -833,7 +1825,9 @@ private struct RemoteSettingsView: View {
             SettingsSectionTitle(title: "Remote SSH")
             SettingsCard {
                 SettingsRow("Enabled") {
-                    Toggle("", isOn: $enabled).labelsHidden()
+                    Toggle("", isOn: $enabled)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
                 }
                 SettingsCardDivider()
                 SettingsRow("Host") {
@@ -1036,6 +2030,7 @@ private struct SystemSettingsView: View {
                 SettingsRow("Launch at Login") {
                     Toggle("", isOn: $launchAtLogin)
                         .labelsHidden()
+                        .toggleStyle(.switch)
                         .onChange(of: launchAtLogin) { _, newValue in
                             do {
                                 if newValue {
@@ -1053,6 +2048,7 @@ private struct SystemSettingsView: View {
                 SettingsRow("Hooks") {
                     Toggle("", isOn: $hooksInstalled)
                         .labelsHidden()
+                        .toggleStyle(.switch)
                         .onChange(of: hooksInstalled) { _, newValue in
                             if newValue {
                                 HookInstaller.installIfNeeded()

@@ -64,11 +64,8 @@ class CocoProvider: AgentProvider {
     func start() async {
         logger.info("Starting Coco provider")
 
-        // Always install/update hooks on startup to ensure latest scripts
-        await installHooks()
-
         // The shared HookSocketServer already handles events from all providers
-        // We just need to ensure our hooks are installed
+        // Hook installation is controlled explicitly from Settings
     }
 
     func stop() async {

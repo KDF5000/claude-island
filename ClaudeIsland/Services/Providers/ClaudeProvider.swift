@@ -62,11 +62,6 @@ class ClaudeProvider: AgentProvider {
     }
 
     func start() async {
-        // Install hooks if needed
-        if !isHookInstalled {
-            await installHooks()
-        }
-
         // Start monitoring (handled by ClaudeSessionMonitor)
     }
 

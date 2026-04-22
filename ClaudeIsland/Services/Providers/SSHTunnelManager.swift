@@ -18,6 +18,7 @@ struct SSHTunnel: Identifiable, Equatable {
     let host: String
     let user: String?
     let sshPort: Int
+    let remotePort: Int
     let localPort: Int
     let process: Process?
     let createdAt: Date
@@ -197,7 +198,12 @@ class SSHTunnelManager: ObservableObject {
         localPort: Int = SSHTunnelManager.defaultPort
     ) -> Bool {
         if activeTunnels.contains(where: {
-            $0.host == host && $0.user == user && $0.sshPort == sshPort && $0.localPort == localPort && ($0.process?.isRunning != false)
+            $0.host == host &&
+            $0.user == user &&
+            $0.sshPort == sshPort &&
+            $0.remotePort == remotePort &&
+            $0.localPort == localPort &&
+            ($0.process?.isRunning != false)
         }) {
             return true
         }
@@ -410,6 +416,7 @@ class SSHTunnelManager: ObservableObject {
                 host: host,
                 user: user,
                 sshPort: port,
+                remotePort: Self.defaultPort,
                 localPort: Self.defaultPort,
                 process: process,
                 createdAt: Date()
@@ -550,6 +557,7 @@ class SSHTunnelManager: ObservableObject {
                 host: host,
                 user: user,
                 sshPort: sshPort,
+                remotePort: remotePort,
                 localPort: localPort,
                 process: process,
                 createdAt: Date()
@@ -627,7 +635,13 @@ class SSHTunnelManager: ObservableObject {
         )
 
         let ids = activeTunnels
-            .filter { $0.host == host && $0.user == user && $0.sshPort == sshPort }
+            .filter {
+                $0.host == host &&
+                $0.user == user &&
+                $0.sshPort == sshPort &&
+                $0.remotePort == remotePort &&
+                $0.localPort == localPort
+            }
             .map { $0.id }
 
         for id in ids {
@@ -636,6 +650,91 @@ class SSHTunnelManager: ObservableObject {
     }
 
     // MARK: - Remote hook bootstrap
+
+    /// Checks whether the remote hook script exists and is executable on the remote host.
+    func isRemoteHookInstalled(
+        host: String,
+        user: String? = nil,
+        sshPort: Int = 22,
+        remotePath: String = "~/.coding-island/hooks/coding-island-remote-hook.py"
+    ) async -> Result<Bool, Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+        var args: [String] = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+        ]
+
+        if sshPort != 22 {
+            args.append(contentsOf: ["-p", String(sshPort)])
+        }
+
+        let hostString: String = {
+            if let user {
+                return "\(user)@\(host)"
+            }
+            return host
+        }()
+
+        let expandedPath: String = {
+            if remotePath.hasPrefix("~/") {
+                return "$HOME/" + remotePath.dropFirst(2)
+            }
+            return remotePath
+        }()
+
+        let escapedPath = expandedPath.replacingOccurrences(of: "\"", with: "\\\"")
+        let cmd = "if [ -x \"\(escapedPath)\" ]; then exit 0; else exit 10; fi"
+        let cmdArg = Self.shellSingleQuote(cmd)
+        args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
+        process.arguments = args
+
+        let stderrPipe = Pipe()
+        process.standardError = stderrPipe
+
+        do {
+            let terminationStatus = try await runProcessAsync(process)
+
+            switch terminationStatus {
+            case 0:
+                return .success(true)
+            case 10:
+                return .success(false)
+            default:
+                let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                let errText = String(data: errData, encoding: .utf8) ?? ""
+                let error = NSError(
+                    domain: "SSHTunnelManager",
+                    code: Int(terminationStatus),
+                    userInfo: [
+                        NSLocalizedDescriptionKey: errText.isEmpty
+                            ? "ssh exited with status \(terminationStatus)"
+                            : errText
+                    ]
+                )
+                return .failure(error)
+            }
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func runProcessAsync(_ process: Process) async throws -> Int32 {
+        try await withCheckedThrowingContinuation { continuation in
+            process.terminationHandler = { finishedProcess in
+                continuation.resume(returning: finishedProcess.terminationStatus)
+            }
+
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                continuation.resume(throwing: error)
+            }
+        }
+    }
 
     /// Uploads the remote hook script to the remote host over SSH.
     /// Writes to `~/.coding-island/hooks/coding-island-remote-hook.py` by default.
