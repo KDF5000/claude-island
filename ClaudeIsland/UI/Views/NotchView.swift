@@ -75,6 +75,22 @@ struct NotchView: View {
         closedNotchSize.width - cornerRadiusInsets.closed.top + completionPromptTitleWidth + sideWidth
     }
 
+    private var closedCompletionPromptWidth: CGFloat {
+        completionPromptBodyWidth + sideWidth
+    }
+
+    private var openedCompletionPromptWidth: CGFloat {
+        notchSize.width - 24
+    }
+
+    private var openedCompletionLeadingWidth: CGFloat {
+        26
+    }
+
+    private var openedCompletionTrailingWidth: CGFloat {
+        54
+    }
+
     // MARK: - Sizing
 
     private var closedNotchSize: CGSize {
@@ -276,64 +292,62 @@ struct NotchView: View {
 
     @ViewBuilder
     private var headerRow: some View {
-        HStack(spacing: 0) {
+        if viewModel.status == .opened, let completionTitle = completionPromptTitle {
+            openedCompletionHeaderRow(title: completionTitle)
+        } else if let completionTitle = completionPromptTitle {
+            closedCompletionHeaderRow(title: completionTitle)
+        } else {
+            HStack(spacing: 0) {
             // Left side - crab + optional permission indicator (visible when processing, pending, or waiting for input)
-            if showClosedActivity {
-                HStack(spacing: 4) {
-                    ClaudeCrabIcon(size: 14, animateLegs: isProcessing)
-                        .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: showClosedActivity)
+                if showClosedActivity {
+                    HStack(spacing: 4) {
+                        ClaudeCrabIcon(size: 14, animateLegs: isProcessing)
+                            .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: showClosedActivity)
 
-                    // Permission indicator only (amber) - waiting for input shows checkmark on right
-                    if hasPendingPermission {
-                        PermissionIndicatorIcon(size: 14, color: Color(red: 0.85, green: 0.47, blue: 0.34))
-                            .matchedGeometryEffect(id: "status-indicator", in: activityNamespace, isSource: showClosedActivity)
+                        // Permission indicator only (amber) - waiting for input shows checkmark on right
+                        if hasPendingPermission {
+                            PermissionIndicatorIcon(size: 14, color: Color(red: 0.85, green: 0.47, blue: 0.34))
+                                .matchedGeometryEffect(id: "status-indicator", in: activityNamespace, isSource: showClosedActivity)
+                        }
+                    }
+                    .frame(width: viewModel.status == .opened ? nil : sideWidth + (hasPendingPermission ? 18 : 0))
+                    .padding(.leading, viewModel.status == .opened ? 8 : 0)
+                }
+
+                // Center content
+                if viewModel.status == .opened {
+                    // Opened: show header content
+                    openedHeaderContent
+                } else if !showClosedActivity {
+                    // Closed without activity: empty space
+                    Rectangle()
+                        .fill(.clear)
+                        .frame(width: closedNotchSize.width - 20)
+                } else {
+                    // Closed with activity: black spacer (with optional bounce)
+                    Rectangle()
+                        .fill(.black)
+                        .frame(width: closedNotchSize.width - cornerRadiusInsets.closed.top + (isBouncing ? 16 : 0))
+                }
+
+                // Right side - spinner when processing/pending, checkmark when waiting for input
+                if showClosedActivity {
+                    if isProcessing || hasPendingPermission {
+                        ProcessingSpinner()
+                            .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
+                            .frame(width: viewModel.status == .opened ? 20 : sideWidth)
+                            .padding(.trailing, viewModel.status == .opened ? 0 : 4)
+                    } else if hasWaitingForInput && !isShowingCompletionPrompt && viewModel.status != .opened {
+                        // Checkmark for waiting-for-input on the right side
+                        ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
+                            .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
+                            .frame(width: viewModel.status == .opened ? 20 : sideWidth)
+                            .padding(.trailing, viewModel.status == .opened ? 0 : 4)
                     }
                 }
-                .frame(width: viewModel.status == .opened ? nil : sideWidth + (hasPendingPermission ? 18 : 0))
-                .padding(.leading, viewModel.status == .opened ? 8 : 0)
             }
-
-            // Center content
-            if viewModel.status == .opened {
-                // Opened: show header content
-                openedHeaderContent
-            } else if !showClosedActivity {
-                // Closed without activity: empty space
-                Rectangle()
-                    .fill(.clear)
-                    .frame(width: closedNotchSize.width - 20)
-            } else if let completionTitle = completionPromptTitle {
-                NotchCompletionPromptView(
-                    title: completionTitle,
-                    titleWidth: completionPromptTitleWidth,
-                    contentWidth: completionPromptBodyWidth,
-                    indicatorWidth: sideWidth,
-                    namespace: activityNamespace
-                )
-            } else {
-                // Closed with activity: black spacer (with optional bounce)
-                Rectangle()
-                    .fill(.black)
-                    .frame(width: closedNotchSize.width - cornerRadiusInsets.closed.top + (isBouncing ? 16 : 0))
-            }
-
-            // Right side - spinner when processing/pending, checkmark when waiting for input
-            if showClosedActivity {
-                if isProcessing || hasPendingPermission {
-                    ProcessingSpinner()
-                        .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
-                        .frame(width: viewModel.status == .opened ? 20 : sideWidth)
-                        .padding(.trailing, viewModel.status == .opened ? 0 : 4)
-                } else if hasWaitingForInput && !isShowingCompletionPrompt {
-                    // Checkmark for waiting-for-input on the right side
-                    ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
-                        .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
-                        .frame(width: viewModel.status == .opened ? 20 : sideWidth)
-                        .padding(.trailing, viewModel.status == .opened ? 0 : 4)
-                }
-            }
+            .frame(height: closedNotchSize.height)
         }
-        .frame(height: closedNotchSize.height)
     }
 
     private var sideWidth: CGFloat {
@@ -341,6 +355,59 @@ struct NotchView: View {
     }
 
     // MARK: - Opened Header Content
+
+    @ViewBuilder
+    private func closedCompletionHeaderRow(title: String) -> some View {
+        ZStack {
+            HStack(spacing: 0) {
+                ClaudeCrabIcon(size: 14)
+                    .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: true)
+                    .frame(width: sideWidth)
+
+                Spacer(minLength: 0)
+
+                ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
+                    .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: true)
+                    .frame(width: sideWidth)
+                    .padding(.trailing, 4)
+            }
+
+            NotchCompletionPromptView(
+                title: title,
+                contentWidth: closedCompletionPromptWidth,
+                leadingReservedWidth: sideWidth,
+                trailingReservedWidth: sideWidth + 4
+            )
+        }
+        .frame(width: closedCompletionPromptWidth, height: closedNotchSize.height)
+    }
+
+    @ViewBuilder
+    private func openedCompletionHeaderRow(title: String) -> some View {
+        ZStack {
+            HStack(spacing: 12) {
+                ClaudeCrabIcon(size: 14)
+                    .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: true)
+                    .padding(.leading, 8)
+
+                Spacer(minLength: 0)
+
+                ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
+                    .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: true)
+                    .frame(width: 20)
+
+                settingsButton
+            }
+
+            NotchCompletionPromptView(
+                title: title,
+                contentWidth: openedCompletionPromptWidth,
+                leadingReservedWidth: openedCompletionLeadingWidth,
+                trailingReservedWidth: openedCompletionTrailingWidth
+            )
+        }
+        .frame(width: openedCompletionPromptWidth, height: closedNotchSize.height)
+    }
 
     @ViewBuilder
     private var openedHeaderContent: some View {
@@ -355,30 +422,32 @@ struct NotchView: View {
 
             Spacer()
 
-            // Settings button
-            Button {
-                AppDelegate.shared?.showSettingsWindow()
-                updateManager.markUpdateSeen()
-                viewModel.notchClose()
-            } label: {
-                ZStack(alignment: .topTrailing) {
-                    Image(systemName: "gearshape")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundColor(.white.opacity(0.4))
-                        .frame(width: 22, height: 22)
-                        .contentShape(Rectangle())
+            settingsButton
+        }
+    }
 
-                    // Green dot for unseen update
-                    if updateManager.hasUnseenUpdate {
-                        Circle()
-                            .fill(TerminalColors.green)
-                            .frame(width: 6, height: 6)
-                            .offset(x: -2, y: 2)
-                    }
+    private var settingsButton: some View {
+        Button {
+            AppDelegate.shared?.showSettingsWindow()
+            updateManager.markUpdateSeen()
+            viewModel.notchClose()
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.white.opacity(0.4))
+                    .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
+
+                if updateManager.hasUnseenUpdate {
+                    Circle()
+                        .fill(TerminalColors.green)
+                        .frame(width: 6, height: 6)
+                        .offset(x: -2, y: 2)
                 }
             }
-            .buttonStyle(.plain)
         }
+        .buttonStyle(.plain)
     }
 
     // MARK: - Content View (Opened State)
@@ -451,6 +520,7 @@ struct NotchView: View {
             isVisible = true
             // Clear waiting-for-input timestamps only when manually opened (user acknowledged)
             if viewModel.openReason == .click || viewModel.openReason == .hover {
+                activityCoordinator.hideCompletionPromptIfNeeded()
                 waitingForInputTimestamps.removeAll()
             }
         case .closed:
@@ -516,6 +586,8 @@ struct NotchView: View {
 
         // Bounce the notch when a session newly enters waitingForInput state
         if !newWaitingIds.isEmpty {
+            isVisible = true
+
             // Get the sessions that just entered waitingForInput
             let newlyWaitingSessions = waitingForInputSessions.filter { newWaitingIds.contains($0.stableId) }
 

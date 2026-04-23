@@ -887,11 +887,33 @@ actor SessionStore {
             }
         }
 
+        sessions[payload.sessionId] = session
+
+        await emitToolCompletionEvents(
+            sessionId: payload.sessionId,
+            session: session,
+            completedToolIds: payload.completedToolIds,
+            toolResults: payload.toolResults,
+            structuredResults: payload.structuredResults
+        )
+
+        await transitionCocoSessionToWaitingForInputIfNeeded(
+            sessionId: payload.sessionId,
+            sawAgentEnd: payload.sawAgentEnd
+        )
+    }
+
+    private func transitionCocoSessionToWaitingForInputIfNeeded(
+        sessionId: String,
+        sawAgentEnd: Bool
+    ) async {
+        guard sawAgentEnd, var session = sessions[sessionId] else { return }
+
         // Coco can naturally finish a turn by writing `agent_end` into events.jsonl
         // without emitting a final idle/waiting hook. In that case the process stays
         // alive for the next prompt, but the UI would remain stuck in `.processing`.
         let isCocoSession = session.providerId == "coco" || session.providerId == "coco-remote"
-        let hasPendingPermission = HookSocketServer.shared.hasPendingPermission(sessionId: payload.sessionId)
+        let hasPendingPermission = HookSocketServer.shared.hasPendingPermission(sessionId: sessionId)
         let hasRunningTool = session.chatItems.contains { item in
             guard case .toolCall(let tool) = item.type else { return false }
             return tool.status == .running
@@ -902,24 +924,14 @@ actor SessionStore {
         }
 
         if isCocoSession,
-           payload.sawAgentEnd,
            session.phase == .processing,
            !hasPendingPermission,
            !hasRunningTool,
            !hasWaitingApprovalTool,
            session.phase.canTransition(to: .waitingForInput) {
             session.phase = .waitingForInput
+            sessions[sessionId] = session
         }
-
-        sessions[payload.sessionId] = session
-
-        await emitToolCompletionEvents(
-            sessionId: payload.sessionId,
-            session: session,
-            completedToolIds: payload.completedToolIds,
-            toolResults: payload.toolResults,
-            structuredResults: payload.structuredResults
-        )
     }
 
     /// Populate subagent tools for Task/Agent tools using their agent JSONL files
