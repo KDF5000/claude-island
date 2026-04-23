@@ -12,6 +12,47 @@ import os.log
 
 private let logger = Logger(subsystem: "com.codingisland", category: "SSHTunnel")
 
+// MARK: - Local debug log (file)
+// Console.app 有时不会显示 info/debug 级别日志；为了可观测性，把 Remote Hook 的关键步骤
+// 额外落到本机日志文件，便于用户直接查看。
+private let remoteHookLogLock = NSLock()
+
+private func appendRemoteHookLog(_ line: String) {
+    remoteHookLogLock.lock()
+    defer { remoteHookLogLock.unlock() }
+
+    let fm = FileManager.default
+    let home = fm.homeDirectoryForCurrentUser
+    let dir = home.appendingPathComponent("Library/Logs/CodingIsland", isDirectory: true)
+    let fileURL = dir.appendingPathComponent("remote-hook.log", isDirectory: false)
+
+    do {
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        if !fm.fileExists(atPath: fileURL.path) {
+            fm.createFile(atPath: fileURL.path, contents: nil)
+        }
+
+        let df = ISO8601DateFormatter()
+        df.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let stamp = df.string(from: Date())
+        let out = "[\(stamp)] \(line)\n"
+        guard let data = out.data(using: .utf8) else { return }
+
+        let handle = try FileHandle(forWritingTo: fileURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: data)
+        try handle.close()
+    } catch {
+        // Worst case: swallow logging failures.
+    }
+}
+
+private func remoteHookLogPathString() -> String {
+    FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Logs/CodingIsland/remote-hook.log")
+        .path
+}
+
 /// Represents an active SSH tunnel
 struct SSHTunnel: Identifiable, Equatable {
     let id: UUID
@@ -651,7 +692,530 @@ class SSHTunnelManager: ObservableObject {
 
     // MARK: - Remote hook bootstrap
 
-    /// Checks whether the remote hook script exists and is executable on the remote host.
+    /// Typical Trae/Coco config paths on remote machines (checked in order).
+    private static let remoteCocoConfigCandidates: [String] = [
+        "$HOME/.trae/traecli.yaml",
+        "$HOME/.config/coco/coco.yaml",
+        "$HOME/.config/coco/config.yaml",
+        "$HOME/.coco/coco.yaml",
+        "$HOME/.coco.yaml",
+    ]
+
+    /// Some SSH setups can provide a wrong `$HOME` in non-interactive sessions.
+    /// Fix it by reading the real home directory from the passwd database.
+    ///
+    /// This shell snippet runs on the remote machine inside `bash -lc`.
+    private static func remoteHomeBootstrapShell() -> String {
+        // Prefer reading the home from the passwd database.
+        // Fall back to shell `~` expansion when python isn't available.
+        // We also `export HOME` so subsequent `$HOME/...` expansions are correct.
+        // IMPORTANT: terminate statements with `;` instead of relying on newlines.
+        // Some remote shells/SSH setups can collapse newlines in the transmitted command,
+        // which would turn `export HOME` into `export HOME mkdir -p ...` and fail.
+        return #"""
+HOME="$(python3 -c 'import os,pwd;print(pwd.getpwuid(os.getuid()).pw_dir)' 2>/dev/null || python -c 'import os,pwd;print(pwd.getpwuid(os.getuid()).pw_dir)' 2>/dev/null || eval echo ~)";
+export HOME;
+"""#
+    }
+
+    /// Returns a shell snippet that prints the chosen config path (absolute),
+    /// defaulting to `$HOME/.trae/traecli.yaml` when none exist.
+    private static func remoteResolveConfigPathShell() -> String {
+        // NOTE: keep this POSIX-sh compatible (bash -lc is used remotely).
+        return Self.remoteHomeBootstrapShell() + #"""
+CFG=""
+for p in "$HOME/.trae/traecli.yaml" "$HOME/.config/coco/coco.yaml" "$HOME/.config/coco/config.yaml" "$HOME/.coco/coco.yaml" "$HOME/.coco.yaml"; do
+  if [ -f "$p" ]; then CFG="$p"; break; fi
+done
+if [ -z "$CFG" ]; then CFG="$HOME/.trae/traecli.yaml"; fi
+printf "%s" "$CFG"
+"""#
+    }
+
+    /// Returns a shell snippet that prints all existing config paths (one per line).
+    /// If none exist, prints nothing.
+    private static func remoteListExistingConfigPathsShell() -> String {
+        return Self.remoteHomeBootstrapShell() + #"""
+for p in "$HOME/.trae/traecli.yaml" "$HOME/.config/coco/coco.yaml" "$HOME/.config/coco/config.yaml" "$HOME/.coco/coco.yaml" "$HOME/.coco.yaml"; do
+  if [ -f "$p" ]; then printf "%s\n" "$p"; fi
+done
+"""#
+    }
+
+    /// Best-effort read of remote `$HOME` for building absolute paths in config.
+    private func readRemoteHomeDirectory(host: String, user: String?, sshPort: Int) async -> Result<String, Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+        var args: [String] = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+        ]
+        if sshPort != 22 {
+            args.append(contentsOf: ["-p", String(sshPort)])
+        }
+        let hostString: String = {
+            if let user { return "\(user)@\(host)" }
+            return host
+        }()
+
+        // Print corrected $HOME without trailing newline.
+        let cmd = Self.remoteHomeBootstrapShell() + "printf %s \"$HOME\""
+        let cmdArg = Self.shellSingleQuote(cmd)
+        args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
+        process.arguments = args
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            let status = try await runProcessAsync(process)
+            let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let outText = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            if status == 0, !outText.isEmpty {
+                return .success(outText)
+            }
+
+            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+            let error = NSError(
+                domain: "SSHTunnelManager",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: errText.isEmpty ? "ssh exited with status \(status)" : errText]
+            )
+            return .failure(error)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func resolveRemoteCocoConfigPath(host: String, user: String?, sshPort: Int) async -> Result<String, Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+        var args: [String] = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+        ]
+        if sshPort != 22 {
+            args.append(contentsOf: ["-p", String(sshPort)])
+        }
+        let hostString: String = {
+            if let user { return "\(user)@\(host)" }
+            return host
+        }()
+
+        let cmd = Self.remoteResolveConfigPathShell()
+        let cmdArg = Self.shellSingleQuote(cmd)
+        args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
+        process.arguments = args
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            let status = try await runProcessAsync(process)
+            let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let outText = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+            if status == 0, !outText.isEmpty {
+                return .success(outText)
+            }
+
+            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+            let error = NSError(
+                domain: "SSHTunnelManager",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: errText.isEmpty ? "ssh exited with status \(status)" : errText]
+            )
+            return .failure(error)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func listRemoteExistingCocoConfigPaths(host: String, user: String?, sshPort: Int) async -> Result<[String], Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+        var args: [String] = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+        ]
+        if sshPort != 22 {
+            args.append(contentsOf: ["-p", String(sshPort)])
+        }
+
+        let hostString: String = {
+            if let user { return "\(user)@\(host)" }
+            return host
+        }()
+
+        let cmd = Self.remoteListExistingConfigPathsShell()
+        let cmdArg = Self.shellSingleQuote(cmd)
+        args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
+        process.arguments = args
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            let status = try await runProcessAsync(process)
+            let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let outText = String(data: outData, encoding: .utf8) ?? ""
+            if status == 0 {
+                let paths = outText
+                    .split(separator: "\n")
+                    .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                return .success(paths)
+            }
+
+            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+            let error = NSError(
+                domain: "SSHTunnelManager",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: errText.isEmpty ? "ssh exited with status \(status)" : errText]
+            )
+            return .failure(error)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func readRemoteFile(host: String, user: String?, sshPort: Int, path: String) async -> Result<String, Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+        var args: [String] = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+        ]
+        if sshPort != 22 {
+            args.append(contentsOf: ["-p", String(sshPort)])
+        }
+
+        let hostString: String = {
+            if let user { return "\(user)@\(host)" }
+            return host
+        }()
+
+        let escapedPath = path.replacingOccurrences(of: "\"", with: "\\\"")
+        let cmd = "if [ -f \"\(escapedPath)\" ]; then cat \"\(escapedPath)\"; fi"
+        let cmdArg = Self.shellSingleQuote(cmd)
+        args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
+        process.arguments = args
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            let status = try await runProcessAsync(process)
+            let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let outText = String(data: outData, encoding: .utf8) ?? ""
+
+            if status == 0 {
+                return .success(outText)
+            }
+
+            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+            let error = NSError(
+                domain: "SSHTunnelManager",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: errText.isEmpty ? "ssh exited with status \(status)" : errText]
+            )
+            return .failure(error)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private func writeRemoteFile(host: String, user: String?, sshPort: Int, path: String, content: String) async -> Result<Void, Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+        var args: [String] = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+        ]
+        if sshPort != 22 {
+            args.append(contentsOf: ["-p", String(sshPort)])
+        }
+
+        let hostString: String = {
+            if let user { return "\(user)@\(host)" }
+            return host
+        }()
+
+        let escapedPath = path.replacingOccurrences(of: "\"", with: "\\\"")
+        // `dirname` is available on Linux/macOS; use it to create parent dir.
+        let cmd = "mkdir -p \"$(dirname \"\(escapedPath)\")\" && cat > \"\(escapedPath)\""
+        let cmdArg = Self.shellSingleQuote(cmd)
+        args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
+        process.arguments = args
+
+        let stdinPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardError = stderrPipe
+
+        do {
+            try process.run()
+            if let data = content.data(using: .utf8) {
+                stdinPipe.fileHandleForWriting.write(data)
+            }
+            try? stdinPipe.fileHandleForWriting.close()
+
+            process.waitUntilExit()
+            if process.terminationStatus == 0 {
+                return .success(())
+            }
+
+            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+            let error = NSError(
+                domain: "SSHTunnelManager",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: errText.isEmpty ? "ssh exited with status \(process.terminationStatus)" : errText]
+            )
+            return .failure(error)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    private static func buildRemoteTraeHookBlock(command: String) -> String {
+        // Keep indentation consistent with Trae/Coco YAML (2 spaces under hooks:).
+        return """
+  # Coding Island hook (remote)
+  - type: command
+    command: \(command)
+    # Allow enough time for Island-driven permission decisions.
+    # The hook script will stop waiting early if the CLI proceeds.
+    timeout: 310s
+    matchers:
+      - event: user_prompt_submit
+      - event: pre_tool_use
+      - event: post_tool_use
+      - event: post_tool_use_failure
+      - event: permission_request
+      - event: notification
+      - event: stop
+      - event: subagent_start
+      - event: subagent_stop
+      - event: session_start
+      - event: session_end
+      - event: pre_compact
+      - event: post_compact
+"""
+    }
+
+    /// Inserts/updates our Coding Island hook inside a Trae/Coco YAML config.
+    /// Preserves other hooks by removing only entries that reference our scripts.
+    private static func upsertCodingIslandHook(in content: String, hookBlock: String) -> String {
+        let markers = [
+            "coding-island-remote-hook.py",
+            "coding-island-coco-hook.py",
+            "coco-island-state.py",
+        ]
+
+        var lines = content.components(separatedBy: "\n")
+        if let hooksIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "hooks:" }) {
+            var endIndex = lines.count
+            for i in (hooksIndex + 1)..<lines.count {
+                let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty,
+                   !lines[i].hasPrefix(" "),
+                   !lines[i].hasPrefix("\t"),
+                   !trimmed.hasPrefix("#") {
+                    endIndex = i
+                    break
+                }
+            }
+
+            let beforeHooks = Array(lines[0...hooksIndex])
+            let hooksBody = hooksIndex + 1 < endIndex ? Array(lines[(hooksIndex + 1)..<endIndex]) : []
+            let afterHooks = endIndex < lines.count ? Array(lines[endIndex...]) : []
+
+            // Remove our existing hook blocks but keep other hooks.
+            var kept: [String] = []
+            var idx = 0
+            while idx < hooksBody.count {
+                let line = hooksBody[idx]
+                if line.hasPrefix("  - ") {
+                    var j = idx + 1
+                    while j < hooksBody.count {
+                        if hooksBody[j].hasPrefix("  - ") { break }
+                        j += 1
+                    }
+                    let blockLines = Array(hooksBody[idx..<j])
+                    let blockText = blockLines.joined(separator: "\n")
+                    if markers.contains(where: { blockText.contains($0) }) {
+                        // drop
+                    } else {
+                        kept.append(contentsOf: blockLines)
+                    }
+                    idx = j
+                } else {
+                    kept.append(line)
+                    idx += 1
+                }
+            }
+
+            // Ensure we end hooks section with a newline before appending our block.
+            if !kept.isEmpty, kept.last != "" {
+                kept.append("")
+            }
+            kept.append(contentsOf: hookBlock.components(separatedBy: "\n"))
+
+            var newLines = beforeHooks
+            newLines.append(contentsOf: kept)
+            newLines.append(contentsOf: afterHooks)
+            return newLines.joined(separator: "\n")
+        }
+
+        // No hooks: section; append a new one.
+        if content.isEmpty {
+            return "hooks:\n" + hookBlock
+        }
+        var out = content
+        if !out.hasSuffix("\n") {
+            out += "\n"
+        }
+        // Separate from previous content.
+        out += "\n" + "hooks:\n" + hookBlock
+        return out
+    }
+
+    /// Ensures the remote Trae/Coco config contains the Coding Island remote hook.
+    private func ensureRemoteTraeHookConfigured(
+        host: String,
+        user: String?,
+        sshPort: Int,
+        remoteHomeDirectory: String,
+        remoteHookAbsolutePath: String
+    ) async -> Result<Void, Error> {
+        let hostString: String = {
+            if let user { return "\(user)@\(host)" }
+            return host
+        }()
+
+        // Prefer updating ALL existing config files to avoid ambiguity about which one
+        // the remote CLI actually reads.
+        let listResult = await listRemoteExistingCocoConfigPaths(host: host, user: user, sshPort: sshPort)
+        let paths: [String]
+        switch listResult {
+        case .failure(let err):
+            logger.error("RemoteHook: list existing config paths failed host=\(hostString, privacy: .public): \(err.localizedDescription, privacy: .public)")
+            appendRemoteHookLog("RemoteHook: list configs FAILED host=\(hostString) error=\(err.localizedDescription)")
+            return .failure(err)
+        case .success(let found):
+            paths = found
+        }
+
+        if paths.isEmpty {
+            logger.info("RemoteHook: no existing config files found host=\(hostString, privacy: .public)")
+            appendRemoteHookLog("RemoteHook: no existing config files host=\(hostString)")
+        } else {
+            logger.info("RemoteHook: existing config files host=\(hostString, privacy: .public) paths=\(paths.joined(separator: ","), privacy: .public)")
+            appendRemoteHookLog("RemoteHook: existing config files host=\(hostString) paths=\(paths.joined(separator: ","))")
+        }
+
+        let command = "python3 " + Self.shellSingleQuote(remoteHookAbsolutePath)
+        let hookBlock = Self.buildRemoteTraeHookBlock(command: command)
+
+        // Always write to the canonical config locations users check, even if the CLI
+        // ends up reading a different file on a given distro.
+        var targetSet = Set(paths)
+        targetSet.insert(remoteHomeDirectory + "/.trae/traecli.yaml")
+        targetSet.insert(remoteHomeDirectory + "/.config/coco/coco.yaml")
+        let targetPaths = Array(targetSet)
+
+        logger.info(
+            "RemoteHook: will update configs host=\(hostString, privacy: .public) targets=\(targetPaths.sorted().joined(separator: ","), privacy: .public)"
+        )
+        appendRemoteHookLog("RemoteHook: will update configs host=\(hostString) targets=\(targetPaths.sorted().joined(separator: ","))")
+
+        // Apply to each target config.
+        for configPath in targetPaths {
+            logger.info("RemoteHook: updating config host=\(hostString, privacy: .public) path=\(configPath, privacy: .public)")
+            appendRemoteHookLog("RemoteHook: updating config host=\(hostString) path=\(configPath)")
+            let readResult = await readRemoteFile(host: host, user: user, sshPort: sshPort, path: configPath)
+            let existing: String
+            switch readResult {
+            case .success(let text):
+                existing = text
+            case .failure(let err):
+                logger.error("RemoteHook: read config failed host=\(hostString, privacy: .public) path=\(configPath, privacy: .public): \(err.localizedDescription, privacy: .public)")
+                appendRemoteHookLog("RemoteHook: read config FAILED host=\(hostString) path=\(configPath) error=\(err.localizedDescription)")
+                return .failure(err)
+            }
+
+            logger.info("RemoteHook: read config OK host=\(hostString, privacy: .public) path=\(configPath, privacy: .public) bytes=\(existing.utf8.count, privacy: .public)")
+            appendRemoteHookLog("RemoteHook: read config OK host=\(hostString) path=\(configPath) bytes=\(existing.utf8.count)")
+            let updated = Self.upsertCodingIslandHook(in: existing, hookBlock: hookBlock)
+            let writeResult = await writeRemoteFile(host: host, user: user, sshPort: sshPort, path: configPath, content: updated)
+            switch writeResult {
+            case .success:
+                logger.info("RemoteHook: wrote config OK host=\(hostString, privacy: .public) path=\(configPath, privacy: .public)")
+                appendRemoteHookLog("RemoteHook: wrote config OK host=\(hostString) path=\(configPath)")
+                // Read-after-write verification. Users reported “success” but the file
+                // didn't actually contain hooks when inspected manually.
+                let verifyRead = await readRemoteFile(host: host, user: user, sshPort: sshPort, path: configPath)
+                switch verifyRead {
+                case .failure(let err):
+                    logger.error("RemoteHook: verify read failed host=\(hostString, privacy: .public) path=\(configPath, privacy: .public): \(err.localizedDescription, privacy: .public)")
+                    appendRemoteHookLog("RemoteHook: verify read FAILED host=\(hostString) path=\(configPath) error=\(err.localizedDescription)")
+                    return .failure(err)
+                case .success(let afterWriteText):
+                    if !afterWriteText.contains("hooks:") || !afterWriteText.contains("coding-island-remote-hook.py") {
+                        let preview = String(afterWriteText.prefix(500))
+                        let message = "Remote hook 配置写入校验失败：写入后回读未包含 hooks/remote-hook 标记。\n" +
+                                      "path=\(configPath)\n" +
+                                      "expectedHook=\(remoteHookAbsolutePath)\n" +
+                                      "preview=\n\(preview)"
+                        logger.error("RemoteHook: verify FAILED host=\(hostString, privacy: .public) path=\(configPath, privacy: .public)")
+                        appendRemoteHookLog("RemoteHook: verify FAILED host=\(hostString) path=\(configPath) preview=\(preview)")
+                        let error = NSError(
+                            domain: "SSHTunnelManager",
+                            code: 2001,
+                            userInfo: [NSLocalizedDescriptionKey: message]
+                        )
+                        return .failure(error)
+                    }
+
+                    logger.info("RemoteHook: verify OK host=\(hostString, privacy: .public) path=\(configPath, privacy: .public) bytes=\(afterWriteText.utf8.count, privacy: .public)")
+                    appendRemoteHookLog("RemoteHook: verify OK host=\(hostString) path=\(configPath) bytes=\(afterWriteText.utf8.count)")
+                }
+            case .failure(let err):
+                logger.error("RemoteHook: write config FAILED host=\(hostString, privacy: .public) path=\(configPath, privacy: .public): \(err.localizedDescription, privacy: .public)")
+                appendRemoteHookLog("RemoteHook: write config FAILED host=\(hostString) path=\(configPath) error=\(err.localizedDescription)")
+                return .failure(err)
+            }
+        }
+
+        return .success(())
+    }
+
+    /// Checks whether the remote hook script exists on the remote host and whether
+    /// Trae/Coco config references it (otherwise no events will fire).
     func isRemoteHookInstalled(
         host: String,
         user: String? = nil,
@@ -686,25 +1250,68 @@ class SSHTunnelManager: ObservableObject {
         }()
 
         let escapedPath = expandedPath.replacingOccurrences(of: "\"", with: "\\\"")
-        let cmd = "if [ -x \"\(escapedPath)\" ]; then exit 0; else exit 10; fi"
+        // Consider the remote hook "installed" only when:
+        // 1) the script exists (it is executed via `python3 <path>`, so exec bit isn't required)
+        // 2) Trae/Coco config references the script (otherwise no events will fire)
+        // NOTE: this must be a *non-raw* Swift string literal so `\(escapedPath)` interpolates.
+        // Using a `#"""` raw string would require `\#(escapedPath)`.
+        let cmd = Self.remoteHomeBootstrapShell() + """
+echo "SCRIPT_PATH=\(escapedPath)"
+if [ -f "\(escapedPath)" ]; then
+  echo "SCRIPT_EXISTS=1"
+else
+  echo "SCRIPT_EXISTS=0"
+  exit 10
+fi
+
+found_path=""
+for p in "$HOME/.trae/traecli.yaml" "$HOME/.config/coco/coco.yaml" "$HOME/.config/coco/config.yaml" "$HOME/.coco/coco.yaml" "$HOME/.coco.yaml"; do
+  if [ -f "$p" ]; then
+    if grep -q "coding-island-remote-hook.py" "$p" 2>/dev/null; then
+      found_path="$p"
+      break
+    fi
+  fi
+done
+echo "FOUND_CONFIG=$found_path"
+if [ -n "$found_path" ]; then
+  exit 0
+fi
+exit 11
+"""
         let cmdArg = Self.shellSingleQuote(cmd)
         args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
         process.arguments = args
 
+        let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
         do {
             let terminationStatus = try await runProcessAsync(process)
 
+            // Diagnostic: record stdout/stderr to the local file log so users can see
+            // why the UI shows "Not Installed".
+            let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let outText = String(data: outData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let errText = String(data: errData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !outText.isEmpty {
+                appendRemoteHookLog("RemoteHook: status-check stdout host=\(hostString) code=\(terminationStatus)\n\(outText)")
+            } else {
+                appendRemoteHookLog("RemoteHook: status-check stdout host=\(hostString) code=\(terminationStatus) <empty>")
+            }
+            if !errText.isEmpty {
+                appendRemoteHookLog("RemoteHook: status-check stderr host=\(hostString) code=\(terminationStatus)\n\(errText)")
+            }
+
             switch terminationStatus {
             case 0:
                 return .success(true)
-            case 10:
+            case 10, 11:
                 return .success(false)
             default:
-                let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let errText = String(data: errData, encoding: .utf8) ?? ""
                 let error = NSError(
                     domain: "SSHTunnelManager",
                     code: Int(terminationStatus),
@@ -716,6 +1323,90 @@ class SSHTunnelManager: ObservableObject {
                 )
                 return .failure(error)
             }
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// Reads the `TCP_PORT` constant from the remote hook script.
+    ///
+    /// Returns:
+    /// - `.success(Int?)`: parsed port if present, else nil (file exists but port line missing)
+    /// - `.failure(Error)`: ssh failed or remote command errored
+    func readRemoteHookTCPPort(
+        host: String,
+        user: String? = nil,
+        sshPort: Int = 22,
+        remotePath: String = "~/.coding-island/hooks/coding-island-remote-hook.py"
+    ) async -> Result<Int?, Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+        var args: [String] = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+        ]
+
+        if sshPort != 22 {
+            args.append(contentsOf: ["-p", String(sshPort)])
+        }
+
+        let hostString: String = {
+            if let user {
+                return "\(user)@\(host)"
+            }
+            return host
+        }()
+
+        let expandedPath: String = {
+            if remotePath.hasPrefix("~/") {
+                return "$HOME/" + remotePath.dropFirst(2)
+            }
+            return remotePath
+        }()
+
+        // Use python3 to avoid depending on sed/grep variants.
+        // Print the port as a single line, or empty if not found.
+        let escapedPath = expandedPath.replacingOccurrences(of: "\"", with: "\\\"")
+        let cmd = Self.remoteHomeBootstrapShell() + "python3 -c 'import re,sys; p=sys.argv[1];\n" +
+                  "\ntry: txt=open(p, \"r\", encoding=\"utf-8\", errors=\"ignore\").read()\n" +
+                  "except Exception: sys.exit(10)\n" +
+                  "m=re.search(r\"(?m)^TCP_PORT\\\\s*=\\\\s*(\\\\d+)\\\\s*$\", txt)\n" +
+                  "print(m.group(1) if m else \"\")' \"\(escapedPath)\""
+        let cmdArg = Self.shellSingleQuote(cmd)
+        args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
+        process.arguments = args
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            let status = try await runProcessAsync(process)
+            let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            let outText = (String(data: outData, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+
+            if status == 0 {
+                if outText.isEmpty {
+                    return .success(nil)
+                }
+                return .success(Int(outText))
+            }
+
+            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+            let error = NSError(
+                domain: "SSHTunnelManager",
+                code: Int(status),
+                userInfo: [
+                    NSLocalizedDescriptionKey: errText.isEmpty
+                        ? "ssh exited with status \(status)"
+                        : errText
+                ]
+            )
+            return .failure(error)
         } catch {
             return .failure(error)
         }
@@ -769,6 +1460,10 @@ class SSHTunnelManager: ObservableObject {
             return host
         }()
 
+        let startMsg = "RemoteHook: install start host=\(hostString) sshPort=\(sshPort) tcpPort=\(tcpPort) localPort=\(localPort) remotePath=\(remotePath) log=\(remoteHookLogPathString())"
+        appendRemoteHookLog(startMsg)
+        logger.notice("\(startMsg, privacy: .public)")
+
         // NOTE: ssh transmits a single command string (not argv). If we pass
         // `bash -lc <cmd>` as multiple arguments, remote shell parsing can break
         // the `-c` command string (e.g. `bash -lc mkdir -p ...` -> command is only
@@ -783,7 +1478,7 @@ class SSHTunnelManager: ObservableObject {
         }()
 
         let escapedPath = expandedPath.replacingOccurrences(of: "\"", with: "\\\"")
-        let cmd = "mkdir -p \"$HOME/.coding-island/hooks\" && cat > \"\(escapedPath)\" && chmod 755 \"\(escapedPath)\""
+        let cmd = Self.remoteHomeBootstrapShell() + "mkdir -p \"$HOME/.coding-island/hooks\" && cat > \"\(escapedPath)\" && chmod 755 \"\(escapedPath)\""
         let cmdArg = Self.shellSingleQuote(cmd)
         args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
 
@@ -805,11 +1500,59 @@ class SSHTunnelManager: ObservableObject {
             process.waitUntilExit()
             if process.terminationStatus == 0 {
                 logger.info("Installed remote hook to \(hostString, privacy: .public):\(remotePath, privacy: .public)")
-                return .success(())
+                appendRemoteHookLog("RemoteHook: script written OK host=\(hostString) remotePath=\(remotePath)")
+
+                // Also ensure the remote Trae/Coco config actually calls this hook.
+                // Without this, the script exists but never runs, so the app sees no events.
+                let homeResult = await readRemoteHomeDirectory(host: host, user: user, sshPort: sshPort)
+                switch homeResult {
+                case .failure(let err):
+                    logger.error("RemoteHook: read remote HOME failed host=\(hostString, privacy: .public): \(err.localizedDescription, privacy: .public)")
+                    appendRemoteHookLog("RemoteHook: read HOME FAILED host=\(hostString) error=\(err.localizedDescription)")
+                    return .failure(err)
+                case .success(let homeDir):
+                    logger.info("RemoteHook: resolved remote HOME host=\(hostString, privacy: .public) HOME=\(homeDir, privacy: .public)")
+                    appendRemoteHookLog("RemoteHook: resolved HOME host=\(hostString) HOME=\(homeDir)")
+                    // Build absolute path (avoid relying on ~/$HOME expansion in the CLI runner).
+                    let hookAbsPath: String = {
+                        if remotePath.hasPrefix("~/") {
+                            return homeDir + "/" + String(remotePath.dropFirst(2))
+                        }
+                        if remotePath.hasPrefix("$HOME/") {
+                            return homeDir + "/" + String(remotePath.dropFirst(6))
+                        }
+                        return remotePath
+                    }()
+
+                    let cfgResult = await ensureRemoteTraeHookConfigured(
+                        host: host,
+                        user: user,
+                        sshPort: sshPort,
+                        remoteHomeDirectory: homeDir,
+                        remoteHookAbsolutePath: hookAbsPath
+                    )
+                    switch cfgResult {
+                    case .success:
+                        logger.info("RemoteHook: config updated OK host=\(hostString, privacy: .public)")
+                        appendRemoteHookLog("RemoteHook: config updated OK host=\(hostString)")
+                        return .success(())
+                    case .failure(let err):
+                        logger.error("RemoteHook: config update FAILED host=\(hostString, privacy: .public): \(err.localizedDescription, privacy: .public)")
+                        appendRemoteHookLog("RemoteHook: config update FAILED host=\(hostString) error=\(err.localizedDescription)")
+                        return .failure(err)
+                    }
+                }
             }
 
             let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
             let errText = String(data: errData, encoding: .utf8) ?? ""
+            if !errText.isEmpty {
+                logger.error("RemoteHook: ssh failed host=\(hostString, privacy: .public) status=\(process.terminationStatus, privacy: .public) stderr=\(errText, privacy: .public)")
+                appendRemoteHookLog("RemoteHook: ssh failed host=\(hostString) status=\(process.terminationStatus) stderr=\(errText)")
+            } else {
+                logger.error("RemoteHook: ssh failed host=\(hostString, privacy: .public) status=\(process.terminationStatus, privacy: .public)")
+                appendRemoteHookLog("RemoteHook: ssh failed host=\(hostString) status=\(process.terminationStatus)")
+            }
             let error = NSError(
                 domain: "SSHTunnelManager",
                 code: Int(process.terminationStatus),
@@ -817,6 +1560,8 @@ class SSHTunnelManager: ObservableObject {
             )
             return .failure(error)
         } catch {
+            logger.error("RemoteHook: ssh launch failed host=\(hostString, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            appendRemoteHookLog("RemoteHook: ssh launch failed host=\(hostString) error=\(error.localizedDescription)")
             return .failure(error)
         }
     }
