@@ -623,7 +623,17 @@ actor ConversationParser {
             } else if line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"") || line.contains("\"agent_start\"") || line.contains("\"message\"") || line.contains("\"agent_end\"") {
                 if let lineData = line.data(using: .utf8),
                    let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] {
+                    // Coco/Trae 的 events.jsonl 在不同版本里对 agent_end 的编码方式不一致：
+                    // - {"agent_end": {...}}
+                    // - {"type":"agent_end", ...}
+                    // - {"event":"agent_end", ...}
                     if json["agent_end"] != nil {
+                        sawAgentEnd = true
+                    } else if let t = json["type"] as? String, t.lowercased() == "agent_end" {
+                        sawAgentEnd = true
+                    } else if let e = json["event"] as? String, e.lowercased() == "agent_end" {
+                        sawAgentEnd = true
+                    } else if let name = json["name"] as? String, name.lowercased() == "agent_end" {
                         sawAgentEnd = true
                     }
 
