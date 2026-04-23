@@ -393,7 +393,9 @@ private struct SettingsSidebarView: View {
                             section: section,
                             isSelected: selection == section
                         ) {
-                            selection = section
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                selection = section
+                            }
                         }
                     }
                 }
@@ -407,7 +409,9 @@ private struct SettingsSidebarView: View {
                             section: section,
                             isSelected: selection == section
                         ) {
-                            selection = section
+                            withAnimation(.easeInOut(duration: 0.16)) {
+                                selection = section
+                            }
                         }
                     }
                 }
@@ -438,6 +442,9 @@ private struct SettingsSidebarRow: View {
     let isSelected: Bool
     let action: () -> Void
 
+    @State private var isHovering = false
+    @State private var didPushCursor = false
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
@@ -455,10 +462,45 @@ private struct SettingsSidebarRow: View {
             .padding(.vertical, 9)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(isSelected ? SettingsStyle.sidebarSelection : Color.clear)
+                    .fill(isSelected ? SettingsStyle.sidebarSelection : (isHovering ? SettingsStyle.sidebarHover : Color.clear))
             )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(SettingsSidebarRowButtonStyle())
+        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .onHover { hovering in
+            withAnimation(.easeOut(duration: 0.12)) {
+                isHovering = hovering
+            }
+
+            // SwiftUI 没有稳定的 cursor modifier，这里用 AppKit 提供指针反馈。
+            if hovering {
+                if !didPushCursor {
+                    NSCursor.pointingHand.push()
+                    didPushCursor = true
+                }
+            } else {
+                if didPushCursor {
+                    NSCursor.pop()
+                    didPushCursor = false
+                }
+            }
+        }
+        .onDisappear {
+            if didPushCursor {
+                NSCursor.pop()
+                didPushCursor = false
+            }
+        }
+        .accessibilityHint(isSelected ? "当前选中" : "切换到\(section.title)" )
+    }
+}
+
+private struct SettingsSidebarRowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.98 : 1.0)
+            .opacity(configuration.isPressed ? 0.90 : 1.0)
+            .animation(.spring(response: 0.22, dampingFraction: 0.78), value: configuration.isPressed)
     }
 }
 
@@ -478,6 +520,9 @@ private enum SettingsStyle {
 
     // Selection pill.
     static let sidebarSelection = Color(nsColor: .systemBlue)
+
+    // Hover highlight for non-selected rows.
+    static let sidebarHover = Color(nsColor: .selectedContentBackgroundColor).opacity(0.18)
 
     // Cards.
     static let cardBackground = Color(nsColor: .windowBackgroundColor)
