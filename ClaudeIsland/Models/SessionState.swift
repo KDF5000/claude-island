@@ -136,7 +136,7 @@ struct SessionState: Equatable, Identifiable, Sendable {
         case "coco", "coco-remote":
             return "Coco"
         case "claude-code":
-            return "Claude Code"
+            return "Claude"
         default:
             return providerId
         }

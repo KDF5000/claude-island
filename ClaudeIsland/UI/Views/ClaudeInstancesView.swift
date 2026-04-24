@@ -183,10 +183,8 @@ struct InstanceRow: View {
                             RemoteHostBadge(host: remoteHost)
                         }
 
-                        // Provider badge (show for non-Claude providers)
-                        if session.providerId != "claude-code" {
-                            ProviderBadge(providerId: session.providerId, displayName: session.providerDisplayName)
-                        }
+                        // Provider badge
+                        ProviderBadge(providerId: session.providerId, displayName: session.providerDisplayName)
 
                         // Token usage indicator
                         if session.usage.totalTokens > 0 {
@@ -534,6 +532,8 @@ struct ProviderBadge: View {
     /// Badge color based on provider
     private var badgeColor: Color {
         switch providerId {
+        case "claude-code":
+            return Color(red: 0.85, green: 0.47, blue: 0.34)  // Claude orange
         case "coco", "coco-remote":
             return Color(red: 0.4, green: 0.6, blue: 0.9)  // Blue for Coco
         default:

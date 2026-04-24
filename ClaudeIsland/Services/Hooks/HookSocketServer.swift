@@ -43,6 +43,9 @@ struct HookEvent: Codable, Sendable {
     /// Whether the hook uses dual-approval mode (short timeout, CLI shows its own UI)
     let dualApprovalMode: Bool?
 
+    // MARK: - Default Values
+    
+    /// Custom decoder that provides default values for missing fields
     enum CodingKeys: String, CodingKey {
         case providerId = "provider_id"
         case sessionId = "session_id"
@@ -58,6 +61,54 @@ struct HookEvent: Codable, Sendable {
         case remoteJsonlLines = "remote_jsonl_lines"
         case remotePathDebug = "remote_path_debug"
         case dualApprovalMode = "dual_approval_mode"
+    }
+    
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        
+        // Provide default for providerId if missing (backward compatibility)
+        providerId = try container.decodeIfPresent(String.self, forKey: .providerId) ?? "claude-code"
+        sessionId = try container.decode(String.self, forKey: .sessionId)
+        cwd = try container.decode(String.self, forKey: .cwd)
+        event = try container.decode(String.self, forKey: .event)
+        status = try container.decode(String.self, forKey: .status)
+        pid = try container.decodeIfPresent(Int.self, forKey: .pid)
+        tty = try container.decodeIfPresent(String.self, forKey: .tty)
+        tool = try container.decodeIfPresent(String.self, forKey: .tool)
+        toolInput = try container.decodeIfPresent([String: AnyCodable].self, forKey: .toolInput)
+        toolUseId = try container.decodeIfPresent(String.self, forKey: .toolUseId)
+        notificationType = try container.decodeIfPresent(String.self, forKey: .notificationType)
+        message = try container.decodeIfPresent(String.self, forKey: .message)
+        transcriptPath = try container.decodeIfPresent(String.self, forKey: .transcriptPath)
+        agentId = try container.decodeIfPresent(String.self, forKey: .agentId)
+        agentType = try container.decodeIfPresent(String.self, forKey: .agentType)
+        remoteHost = try container.decodeIfPresent(String.self, forKey: .remoteHost)
+        remoteJsonlLines = try container.decodeIfPresent([String].self, forKey: .remoteJsonlLines)
+        remotePathDebug = try container.decodeIfPresent([String].self, forKey: .remotePathDebug)
+        dualApprovalMode = try container.decodeIfPresent(Bool.self, forKey: .dualApprovalMode)
+    }
+    
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(providerId, forKey: .providerId)
+        try container.encode(sessionId, forKey: .sessionId)
+        try container.encode(cwd, forKey: .cwd)
+        try container.encode(event, forKey: .event)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(pid, forKey: .pid)
+        try container.encodeIfPresent(tty, forKey: .tty)
+        try container.encodeIfPresent(tool, forKey: .tool)
+        try container.encodeIfPresent(toolInput, forKey: .toolInput)
+        try container.encodeIfPresent(toolUseId, forKey: .toolUseId)
+        try container.encodeIfPresent(notificationType, forKey: .notificationType)
+        try container.encodeIfPresent(message, forKey: .message)
+        try container.encodeIfPresent(transcriptPath, forKey: .transcriptPath)
+        try container.encodeIfPresent(agentId, forKey: .agentId)
+        try container.encodeIfPresent(agentType, forKey: .agentType)
+        try container.encodeIfPresent(remoteHost, forKey: .remoteHost)
+        try container.encodeIfPresent(remoteJsonlLines, forKey: .remoteJsonlLines)
+        try container.encodeIfPresent(remotePathDebug, forKey: .remotePathDebug)
+        try container.encodeIfPresent(dualApprovalMode, forKey: .dualApprovalMode)
     }
 
     /// Create a copy with updated toolUseId
