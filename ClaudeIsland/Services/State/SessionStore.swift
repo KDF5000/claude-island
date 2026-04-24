@@ -1348,10 +1348,31 @@ actor SessionStore {
                 continue
             }
 
-            if let pid = session.pid {
+            // Only check local PID for non-remote sessions.
+            // Remote sessions have PIDs from the remote machine; checking them locally
+            // can produce false positives (local process with same PID) or false negatives,
+            // causing sessions to be removed prematurely or stuck forever.
+            if let pid = session.pid, !session.isRemoteSession {
                 let isRunning = isProcessRunning(pid: pid)
                 if !isRunning {
                     Self.logger.info("Process \(pid) no longer running, ending session \(sessionId.prefix(8))")
+                    sessions.removeValue(forKey: sessionId)
+                    cancelPendingSync(sessionId: sessionId)
+                    removedSession = true
+                    continue
+                }
+            }
+
+            // For sessions stuck in waitingForInput, check for inactivity timeout.
+            // A session in waitingForInput means the CLI sent a "stop" event but never
+            // sent session_end — it's truly done but we never got the cleanup signal.
+            // We do NOT timeout processing/waitingForApproval states because tools
+            // can legitimately run for a long time.
+            if session.phase == .waitingForInput {
+                let staleThreshold: TimeInterval = 600 // 10 minutes
+                let elapsed = Date().timeIntervalSince(session.lastActivity)
+                if elapsed > staleThreshold {
+                    Self.logger.info("[Stale] Session \(sessionId.prefix(8), privacy: .public) \(session.isRemoteSession ? "remote" : "local") in waitingForInput for \(Int(elapsed))s, ending")
                     sessions.removeValue(forKey: sessionId)
                     cancelPendingSync(sessionId: sessionId)
                     removedSession = true
