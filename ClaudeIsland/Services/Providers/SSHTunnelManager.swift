@@ -1627,6 +1627,427 @@ exit 11
         return try? String(contentsOf: url, encoding: .utf8)
     }
 
+    // MARK: - Remote History Sync
+
+    /// Result of syncing remote session history to local cache.
+    struct RemoteHistorySyncResult: Sendable {
+        let scannedFiles: Int
+        let syncedFiles: Int
+        let skippedFiles: Int
+        let failedFiles: Int
+    }
+
+    /// Syncs all remote session JSONL files to the local remote-sessions cache.
+    ///
+    /// Scheme A (manual per-host sync): SSH to the remote host, enumerate all
+    /// Claude Code and Coco session directories, download missing/newer JSONL
+    /// files to `~/.coding-island/cache/remote-sessions/<escaped-cwd>/<sessionId>.jsonl`.
+    ///
+    /// After a successful sync, the caller should trigger `TokenStatisticsManager.rebuildHistoryFromDisk()`.
+    func syncRemoteHistory(
+        host: String,
+        user: String? = nil,
+        sshPort: Int = 22
+    ) async -> Result<RemoteHistorySyncResult, Error> {
+        let hostString: String = {
+            if let user { return "\(user)@\(host)" }
+            return host
+        }()
+
+        logger.info("[SyncHistory] Starting remote history sync host=\(hostString, privacy: .public)")
+        appendRemoteHookLog("[SyncHistory] start host=\(hostString)")
+
+        // Step 1: Enumerate remote session files with metadata
+        logger.info("[SyncHistory] step 1: enumerating remote session files host=\(hostString, privacy: .public)")
+        let enumResult = await enumerateRemoteSessionFiles(host: host, user: user, sshPort: sshPort)
+        let entries: [RemoteSessionEntry]
+        switch enumResult {
+        case .success(let e):
+            entries = e
+        case .failure(let err):
+            logger.error("[SyncHistory] enumeration failed host=\(hostString, privacy: .public): \(err.localizedDescription, privacy: .public)")
+            appendRemoteHookLog("[SyncHistory] enum FAILED host=\(hostString) error=\(err.localizedDescription)")
+            return .failure(err)
+        }
+
+        logger.info("[SyncHistory] step 1 done: found \(entries.count, privacy: .public) remote session files host=\(hostString, privacy: .public)")
+        appendRemoteHookLog("[SyncHistory] enum OK host=\(hostString) found=\(entries.count)")
+
+        guard !entries.isEmpty else {
+            logger.info("[SyncHistory] no remote sessions found host=\(hostString, privacy: .public)")
+            appendRemoteHookLog("[SyncHistory] no sessions host=\(hostString)")
+            return .success(RemoteHistorySyncResult(scannedFiles: 0, syncedFiles: 0, skippedFiles: 0, failedFiles: 0))
+        }
+
+        // Step 2: Filter entries that need downloading
+        let fm = FileManager.default
+        var toDownload: [RemoteSessionEntry] = []
+        var skipped = 0
+
+        for entry in entries {
+            let projectDir = entry.cwd
+                .replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: ".", with: "-")
+            let localDir = IslandPaths.remoteCacheDir.appendingPathComponent(projectDir)
+            let localPath = localDir.appendingPathComponent("\(entry.sessionId).jsonl")
+
+            // Dedup: skip if local file exists and is same size or larger
+            if fm.fileExists(atPath: localPath.path) {
+                let localSize = (try? fm.attributesOfItem(atPath: localPath.path)[.size] as? Int) ?? 0
+                if localSize >= entry.fileSize {
+                    skipped += 1
+                    continue
+                }
+            }
+            toDownload.append(entry)
+        }
+
+        logger.info("[SyncHistory] step 2 done: need download=\(toDownload.count, privacy: .public) already cached=\(skipped) host=\(hostString, privacy: .public)")
+        appendRemoteHookLog("[SyncHistory] filter host=\(hostString) toDownload=\(toDownload.count) skipped=\(skipped)")
+
+        guard !toDownload.isEmpty else {
+            let result = RemoteHistorySyncResult(
+                scannedFiles: entries.count,
+                syncedFiles: 0,
+                skippedFiles: skipped,
+                failedFiles: 0
+            )
+            logger.info("[SyncHistory] all cached host=\(hostString, privacy: .public) skipped=\(skipped)")
+            appendRemoteHookLog("[SyncHistory] all cached host=\(hostString)")
+            return .success(result)
+        }
+
+        // Step 3: Batch download all files in a single SSH connection
+        logger.info("[SyncHistory] step 3: batch downloading \(toDownload.count, privacy: .public) files via SSH host=\(hostString, privacy: .public)")
+        appendRemoteHookLog("[SyncHistory] batch download start host=\(hostString) count=\(toDownload.count)")
+        let batchResult = await batchDownloadRemoteFiles(
+            host: host, user: user, sshPort: sshPort,
+            entries: toDownload
+        )
+
+        // Step 4: Write downloaded files to local cache
+        var synced = 0
+        var failed = 0
+        switch batchResult {
+        case .success(let contents):
+            logger.info("[SyncHistory] step 3 done: received \(contents.count, privacy: .public) files from remote host=\(hostString, privacy: .public)")
+            for entry in toDownload {
+                guard let content = contents[entry.sessionId] else {
+                    failed += 1
+                    continue
+                }
+                let projectDir = entry.cwd
+                    .replacingOccurrences(of: "/", with: "-")
+                    .replacingOccurrences(of: ".", with: "-")
+                let localDir = IslandPaths.remoteCacheDir.appendingPathComponent(projectDir)
+                let localPath = localDir.appendingPathComponent("\(entry.sessionId).jsonl")
+                do {
+                    try fm.createDirectory(at: localDir, withIntermediateDirectories: true)
+                    try content.data(using: .utf8)?.write(to: localPath, options: .atomic)
+                    synced += 1
+                } catch {
+                    logger.error("[SyncHistory] write failed sessionId=\(entry.sessionId.prefix(8), privacy: .public): \(error.localizedDescription, privacy: .public)")
+                    failed += 1
+                }
+            }
+        case .failure(let err):
+            logger.error("[SyncHistory] batch download failed host=\(hostString, privacy: .public): \(err.localizedDescription, privacy: .public)")
+            appendRemoteHookLog("[SyncHistory] batch download FAILED host=\(hostString) error=\(err.localizedDescription)")
+            failed = toDownload.count
+        }
+
+        let result = RemoteHistorySyncResult(
+            scannedFiles: entries.count,
+            syncedFiles: synced,
+            skippedFiles: skipped,
+            failedFiles: failed
+        )
+        logger.info("[SyncHistory] complete host=\(hostString, privacy: .public) scanned=\(result.scannedFiles) synced=\(result.syncedFiles) skipped=\(result.skippedFiles) failed=\(result.failedFiles)")
+        appendRemoteHookLog("[SyncHistory] complete host=\(hostString) scanned=\(result.scannedFiles) synced=\(result.syncedFiles) skipped=\(result.skippedFiles) failed=\(result.failedFiles)")
+
+        return .success(result)
+    }
+
+    /// Downloads multiple remote files in a single SSH connection.
+    ///
+    /// Sends the list of files via stdin to a python3 script on the remote host.
+    /// Each line of stdin is "sessionId:remotePath". The script reads each file,
+    /// base64-encodes it, and outputs "<sessionId>===CISYNC===<base64>" per line.
+    private func batchDownloadRemoteFiles(
+        host: String,
+        user: String?,
+        sshPort: Int,
+        entries: [RemoteSessionEntry]
+    ) async -> Result<[String: String], Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+        var args: [String] = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+        ]
+        if sshPort != 22 {
+            args.append(contentsOf: ["-p", String(sshPort)])
+        }
+
+        let hostString: String = {
+            if let user { return "\(user)@\(host)" }
+            return host
+        }()
+
+        // Python3 script that reads "sid:path" lines from stdin and outputs base64
+        let script = Self.remoteHomeBootstrapShell() + #"""
+python3 -c '
+import base64, os, sys
+DELIM = "===CISYNC==="
+for line in sys.stdin:
+    line = line.strip()
+    if not line or ":" not in line:
+        continue
+    sid, p = line.split(":", 1)
+    if not p or not os.path.isfile(p):
+        sys.stderr.write(f"SKIP: {p}\n")
+        continue
+    try:
+        with open(p, "rb") as f:
+            data = f.read()
+        encoded = base64.b64encode(data).decode("ascii")
+        sys.stdout.write(sid + DELIM + encoded + "\n")
+        sys.stdout.flush()
+    except OSError as e:
+        sys.stderr.write(f"ERR: {p}: {e}\n")
+'
+"""#
+
+        let cmdArg = Self.shellSingleQuote(script)
+        args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
+        process.arguments = args
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            // Write stdin payload BEFORE starting the process so data is ready
+            let stdinPayload = entries.map { "\($0.sessionId):\($0.remotePath)" }.joined(separator: "\n") + "\n"
+            if let data = stdinPayload.data(using: .utf8) {
+                stdinPipe.fileHandleForWriting.write(data)
+            }
+            try? stdinPipe.fileHandleForWriting.close()
+
+            // Start reading stdout/stderr in background BEFORE launching the process.
+            // This prevents pipe-buffer deadlock: if the remote writes more than ~64KB
+            // of base64 output, the pipe fills up and the process blocks. Since we're
+            // waiting for it to exit, we'd deadlock. Background reads drain the pipes.
+            let stdoutTask = Task.detached {
+                stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            let stderrTask = Task.detached {
+                stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+
+            // runProcessAsync starts the process and waits for exit
+            let status = try await runProcessAsync(process)
+
+            let outData = await stdoutTask.value
+            let outText = String(data: outData, encoding: .utf8) ?? ""
+
+            let errData = await stderrTask.value
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+            if !errText.isEmpty {
+                logger.info("[SyncHistory] batch download stderr host=\(hostString, privacy: .public): \(errText.prefix(500), privacy: .public)")
+            }
+
+            if status == 0 || !outText.isEmpty {
+                var results: [String: String] = [:]
+                let delimiter = "===CISYNC==="
+                for line in outText.split(separator: "\n") {
+                    // Find the delimiter in the line
+                    guard let delimRange = line.range(of: delimiter) else { continue }
+                    let sid = String(line[..<delimRange.lowerBound])
+                    let b64Start = delimRange.upperBound
+                    let b64Str = String(line[b64Start...])
+                    guard !sid.isEmpty,
+                          let data = Data(base64Encoded: b64Str),
+                          let content = String(data: data, encoding: .utf8) else { continue }
+                    results[sid] = content
+                }
+                return .success(results)
+            }
+
+            let error = NSError(
+                domain: "SSHTunnelManager",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: errText.isEmpty ? "ssh exited with status \(status)" : errText]
+            )
+            return .failure(error)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// Metadata for a remote session file discovered via SSH.
+    private struct RemoteSessionEntry: Sendable {
+        let sessionId: String
+        let cwd: String
+        let remotePath: String
+        let fileSize: Int
+    }
+
+    /// Enumerates all session JSONL files on the remote host.
+    ///
+    /// Outputs a structured list (tab-separated) by running a compact shell
+    /// script that:
+    /// 1. Finds Claude Code sessions under `~/.claude/projects/`
+    /// 2. Finds Coco sessions under `~/Library/Caches/coco/sessions/` (macOS) and `~/.cache/coco/sessions/` (Linux)
+    /// 3. For each file, extracts `session_id` and `cwd` from the first few JSONL lines
+    ///    and prints: `<session_id>\t<cwd>\t<remote_path>\t<file_size>`
+    private func enumerateRemoteSessionFiles(
+        host: String,
+        user: String?,
+        sshPort: Int
+    ) async -> Result<[RemoteSessionEntry], Error> {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+
+        var args: [String] = [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ServerAliveInterval=30",
+            "-o", "ServerAliveCountMax=3",
+        ]
+        if sshPort != 22 {
+            args.append(contentsOf: ["-p", String(sshPort)])
+        }
+
+        let hostString: String = {
+            if let user { return "\(user)@\(host)" }
+            return host
+        }()
+
+        let cmd = Self.remoteEnumerateSessionsShell()
+        let cmdArg = Self.shellSingleQuote(cmd)
+        args.append(contentsOf: [hostString, "bash", "-lc", cmdArg])
+        process.arguments = args
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            // Start reading stdout/stderr in background to prevent pipe deadlock
+            let stdoutTask = Task.detached {
+                stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+            let stderrTask = Task.detached {
+                stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            }
+
+            let status = try await runProcessAsync(process)
+            let outData = await stdoutTask.value
+            let outText = String(data: outData, encoding: .utf8) ?? ""
+            let errData = await stderrTask.value
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+
+            if status == 0 {
+                let entries = parseRemoteSessionEntries(outText)
+                if !errText.isEmpty {
+                    logger.info("[SyncHistory] enumerate stderr host=\(hostString, privacy: .public): \(errText.prefix(500), privacy: .public)")
+                }
+                logger.info("[SyncHistory] enumerate found \(entries.count, privacy: .public) entries, stdout=\(outText.count, privacy: .public) bytes host=\(hostString, privacy: .public)")
+                return .success(entries)
+            }
+
+            let error = NSError(
+                domain: "SSHTunnelManager",
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: errText.isEmpty ? "ssh exited with status \(status)" : errText]
+            )
+            return .failure(error)
+        } catch {
+            return .failure(error)
+        }
+    }
+
+    /// Shell script that finds remote session files and outputs tab-separated metadata.
+    ///
+    /// Output format per line: `<session_id>\t<cwd>\t<remote_path>\t<file_size>`
+    ///
+    /// The script uses `python3` (available on most remotes) for reliable JSON
+    /// parsing of session metadata. Falls back to a simple `find` + `awk` approach
+    /// if python3 is not available.
+    private static func remoteEnumerateSessionsShell() -> String {
+        // Pure shell approach: use find + stat to list session files.
+        // No python3 needed for enumeration — avoids quoting issues and is faster.
+        // Session ID and cwd are derived from the directory structure:
+        //   Claude Code: ~/.claude/projects/<escapedCwd>/<sessionId>.jsonl
+        //   Coco/Trae:   <cache>/sessions/<sessionId>/events.jsonl
+        //
+        // Output format: <sessionId>\t<cwd>\t<remotePath>\t<fileSize>
+        return remoteHomeBootstrapShell() + #"""
+# 1. Claude Code sessions
+claude_dir="$HOME/.claude/projects"
+if [ -d "$claude_dir" ]; then
+    find "$claude_dir" -name "*.jsonl" ! -name "agent-*" ! -path "*/subagents/*" -type f 2>/dev/null | while IFS= read -r fpath; do
+        [ ! -s "$fpath" ] && continue
+        sid="$(basename "$fpath" .jsonl)"
+        cwd="$(basename "$(dirname "$fpath")")"
+        fsize=$(stat -c%s "$fpath" 2>/dev/null || stat -f%z "$fpath" 2>/dev/null || echo "0")
+        printf "%s\t%s\t%s\t%s\n" "$sid" "$cwd" "$fpath" "$fsize"
+    done
+fi
+# 2. Coco/Trae sessions: <base>/sessions/<sessionId>/events.jsonl or session.log
+for sbase in \
+    "$HOME/Library/Caches/coco/sessions" \
+    "$HOME/.cache/coco/sessions" \
+    "$HOME/.config/coco/sessions" \
+    "$HOME/.local/share/coco/sessions" \
+    "$HOME/Library/Caches/trae/sessions" \
+    "$HOME/.cache/trae/sessions"; do
+    [ -d "$sbase" ] || continue
+    for sd in "$sbase"/*/; do
+        [ -d "$sd" ] || continue
+        sid="$(basename "$sd")"
+        fpath=""
+        for candidate in events.jsonl session.log; do
+            if [ -s "$sd$candidate" ]; then
+                fpath="$sd$candidate"
+                break
+            fi
+        done
+        [ -z "$fpath" ] && continue
+        fsize=$(stat -c%s "$fpath" 2>/dev/null || stat -f%z "$fpath" 2>/dev/null || echo "0")
+        printf "%s\t%s\t%s\t%s\n" "$sid" "$sd" "$fpath" "$fsize"
+    done
+done
+"""#
+    }
+
+    /// Parses the tab-separated output from `remoteEnumerateSessionsShell`.
+    private func parseRemoteSessionEntries(_ output: String) -> [RemoteSessionEntry] {
+        var entries: [RemoteSessionEntry] = []
+        for line in output.split(separator: "\n") {
+            let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard parts.count >= 4,
+                  let fileSize = Int(parts[3]) else { continue }
+            let sessionId = String(parts[0]).trimmingCharacters(in: .whitespaces)
+            let cwd = String(parts[1]).trimmingCharacters(in: .whitespaces)
+            let remotePath = String(parts[2]).trimmingCharacters(in: .whitespaces)
+            guard !sessionId.isEmpty else { continue }
+            entries.append(RemoteSessionEntry(
+                sessionId: sessionId,
+                cwd: cwd,
+                remotePath: remotePath,
+                fileSize: fileSize
+            ))
+        }
+        return entries
+    }
+
     private static func shellSingleQuote(_ value: String) -> String {
         "'" + value.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }

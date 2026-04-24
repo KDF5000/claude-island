@@ -1100,6 +1100,7 @@ private struct RemoteMachineSettingsCard: View {
     @State private var statusText: String? = nil
     @State private var errorText: String? = nil
     @State private var remoteHookState: RemoteHookState = .unknown
+    @State private var isSyncingHistory: Bool = false
 
     private var normalizedIdentity: NormalizedRemoteSSHIdentity {
         normalizeRemoteSSHIdentity(host: machine.host, user: machine.user)
@@ -1418,6 +1419,13 @@ private struct RemoteMachineSettingsCard: View {
                         }
                         .disabled(isWorking || normalizedIdentity.host.isEmpty || isEditing)
 
+                        Button(isSyncingHistory ? "Syncing…" : "Sync History") {
+                            Task {
+                                await syncRemoteHistory()
+                            }
+                        }
+                        .disabled(isWorking || isSyncingHistory || normalizedIdentity.host.isEmpty || isEditing)
+
                         Button("Remove") {
                             onRemove()
                         }
@@ -1674,6 +1682,42 @@ private struct RemoteMachineSettingsCard: View {
             remoteHookState = installed ? .installed : .notInstalled
         case .failure(let error):
             remoteHookState = .unavailable(error.localizedDescription)
+        }
+    }
+
+    private func syncRemoteHistory() async {
+        persistNormalizedIdentity()
+        guard !normalizedIdentity.host.isEmpty else { return }
+
+        isSyncingHistory = true
+        statusText = "Syncing remote history…"
+        errorText = nil
+
+        // Run sync on background thread to avoid freezing the UI
+        let result = await Task.detached(priority: .utility) {
+            await self.tunnelManager.syncRemoteHistory(
+                host: self.normalizedIdentity.host,
+                user: self.normalizedIdentity.user,
+                sshPort: self.machine.sshPort
+            )
+        }.value
+
+        isSyncingHistory = false
+
+        switch result {
+        case .success(let syncResult):
+            if syncResult.syncedFiles > 0 {
+                statusText = "Synced \(syncResult.syncedFiles) sessions (\(syncResult.skippedFiles) already cached)"
+                // Trigger token rebuild to count the newly synced sessions
+                await TokenStatisticsManager.shared.rebuildHistoryFromDisk()
+            } else if syncResult.scannedFiles == 0 {
+                statusText = "No remote sessions found"
+            } else {
+                statusText = "All \(syncResult.skippedFiles) sessions already cached"
+            }
+        case .failure(let error):
+            statusText = "Sync failed"
+            errorText = error.localizedDescription
         }
     }
 }
