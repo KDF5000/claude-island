@@ -71,66 +71,9 @@ struct CocoHookInstaller {
         let configPath = resolveConfigPath()
         var content = readConfigFile(at: configPath)
 
-        // 先删掉旧的 Coding Island hook，避免重复条目
-        content = removeHooksFromContent(content)
-
-        // 构造新的 hook 块（不包含 "hooks:" 前缀）
         let python = detectPython()
         let command = "\(python) \(CocoPaths.hookScriptShellPath)"
-        let hookBlock = """
-  # Coding Island hook for Coco/Trae CLI (all events)
-  - type: command
-    command: \(command)
-    # Allow enough time for Island-driven permission decisions.
-    # The hook script will stop waiting early if the CLI proceeds.
-    timeout: 310s
-    matchers:
-      - event: user_prompt_submit
-      - event: pre_tool_use
-      - event: post_tool_use
-      - event: post_tool_use_failure
-      - event: permission_request
-      - event: notification
-      - event: stop
-      - event: subagent_start
-      - event: subagent_stop
-      - event: session_start
-      - event: session_end
-      - event: pre_compact
-      - event: post_compact
-"""
-
-        // 如果已有 hooks: 段，直接整体替换该段，避免字符串定位出错导致 YAML 损坏
-        var lines = content.components(separatedBy: "\n")
-        if let hooksIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "hooks:" }) {
-            var endIndex = lines.count
-
-            // 找到 hooks 段结束位置（下一个顶级 key，或者文件结束）
-            for i in (hooksIndex + 1)..<lines.count {
-                let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
-                if !trimmed.isEmpty,
-                   !lines[i].hasPrefix(" "),
-                   !lines[i].hasPrefix("\t"),
-                   !trimmed.hasPrefix("#") {
-                    endIndex = i
-                    break
-                }
-            }
-
-            let beforeHooks = Array(lines[0...hooksIndex])
-            let afterHooks = endIndex < lines.count ? Array(lines[endIndex...]) : []
-
-            var newLines = beforeHooks
-            newLines.append(contentsOf: hookBlock.components(separatedBy: "\n"))
-            newLines.append(contentsOf: afterHooks)
-            content = newLines.joined(separator: "\n")
-        } else {
-            // 没有 hooks:，在文件末尾新增一个 hooks 段
-            if !content.isEmpty && !content.hasSuffix("\n") {
-                content += "\n"
-            }
-            content += "\n" + "hooks:\n" + hookBlock
-        }
+        content = upsertCodingIslandHook(in: content, command: command)
 
         // Ensure directory exists
         try? FileManager.default.createDirectory(
@@ -183,74 +126,155 @@ struct CocoHookInstaller {
     }
 
     private static func removeHooksFromContent(_ content: String) -> String {
-        // Simple approach: remove hook entries that reference coco-island-state.py
-        // This is a basic implementation; a proper YAML parser would be more robust
+        let markers = [
+            "coding-island-coco-hook.py",
+            "coco-island-state.py",
+        ]
 
-        var lines = content.components(separatedBy: "\n")
-        var result: [String] = []
-        var skipUntilNextTopLevel = false
-        var inHooksSection = false
-        var currentHookIndent = 0
+        return rewriteHooksSection(in: content, markers: markers, appendedHookBlock: nil)
+    }
 
-        for (index, line) in lines.enumerated() {
-            // Detect hooks section start
-            if line.trimmingCharacters(in: .whitespaces) == "hooks:" {
-                inHooksSection = true
-                result.append(line)
-                continue
+    private static func upsertCodingIslandHook(in content: String, command: String) -> String {
+        let markers = [
+            "coding-island-coco-hook.py",
+            "coco-island-state.py",
+        ]
+
+        return rewriteHooksSection(
+            in: content,
+            markers: markers,
+            appendedHookBlock: { itemIndent in
+                buildHookBlock(command: command, itemIndent: itemIndent)
             }
+        )
+    }
 
-            // Detect end of hooks section (new top-level key)
-            if inHooksSection && !line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("\t") && !line.hasPrefix("#") {
-                inHooksSection = false
-            }
-
-            if inHooksSection {
-                // Check if this is a new hook entry
-                if line.hasPrefix("  - type:") {
-                    // Look ahead to see if this hook references our script
-                    let hookBlockStart = index
-                    var hookBlock: [String] = [line]
-
-                    // Collect the full hook block
-                    for j in (index + 1)..<lines.count {
-                        let nextLine = lines[j]
-                        // Check if we've reached the next hook or end of hooks section
-                        if nextLine.hasPrefix("  - ") || (!nextLine.hasPrefix("    ") && !nextLine.isEmpty && !nextLine.hasPrefix("#")) {
-                            break
-                        }
-                        hookBlock.append(nextLine)
-                    }
-
-                    // Check if this hook contains our script reference
-                    let blockContent = hookBlock.joined(separator: "\n")
-                    if blockContent.contains("coding-island-coco-hook.py") || blockContent.contains("coco-island-state.py") {
-                        // Skip this hook block
-                        skipUntilNextTopLevel = true
-                        currentHookIndent = 2
-                        continue
-                    } else {
-                        skipUntilNextTopLevel = false
-                    }
-                }
-
-                if skipUntilNextTopLevel {
-                    // Check if we've reached the next hook
-                    if line.hasPrefix("  - ") {
-                        skipUntilNextTopLevel = false
-                        // Re-check this line
-                        if !line.contains("coding-island-coco-hook.py") && !line.contains("coco-island-state.py") {
-                            result.append(line)
-                        }
-                    }
-                    continue
+    private static func rewriteHooksSection(
+        in content: String,
+        markers: [String],
+        appendedHookBlock: ((String) -> String)?
+    ) -> String {
+        let lines = content.components(separatedBy: "\n")
+        if let hooksIndex = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "hooks:" }) {
+            var endIndex = lines.count
+            for i in (hooksIndex + 1)..<lines.count {
+                let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+                if !trimmed.isEmpty,
+                   !lines[i].hasPrefix(" "),
+                   !lines[i].hasPrefix("\t"),
+                   !trimmed.hasPrefix("#") {
+                    endIndex = i
+                    break
                 }
             }
 
-            result.append(line)
+            let beforeHooks = Array(lines[0...hooksIndex])
+            let hooksBody = hooksIndex + 1 < endIndex ? Array(lines[(hooksIndex + 1)..<endIndex]) : []
+            let afterHooks = endIndex < lines.count ? Array(lines[endIndex...]) : []
+            let itemIndent = detectHookItemIndent(in: hooksBody)
+
+            var kept = filterHookBody(hooksBody, itemIndent: itemIndent, markers: markers)
+            if let appendedHookBlock {
+                if !kept.isEmpty, kept.last?.isEmpty == false {
+                    kept.append("")
+                }
+                kept.append(contentsOf: appendedHookBlock(itemIndent).components(separatedBy: "\n"))
+            }
+
+            var rewritten = beforeHooks
+            rewritten.append(contentsOf: kept)
+            rewritten.append(contentsOf: afterHooks)
+            return rewritten.joined(separator: "\n")
         }
 
-        return result.joined(separator: "\n")
+        guard let appendedHookBlock else { return content }
+
+        var result = content
+        if !result.isEmpty && !result.hasSuffix("\n") {
+            result += "\n"
+        }
+        let separator = result.isEmpty ? "" : "\n"
+        return result + separator + "hooks:\n" + appendedHookBlock("  ")
+    }
+
+    private static func filterHookBody(_ hooksBody: [String], itemIndent: String, markers: [String]) -> [String] {
+        let itemPrefix = itemIndent + "- "
+        var kept: [String] = []
+        var idx = 0
+
+        while idx < hooksBody.count {
+            let line = hooksBody[idx]
+            if line.hasPrefix(itemPrefix) {
+                var j = idx + 1
+                while j < hooksBody.count {
+                    let nextLine = hooksBody[j]
+                    let trimmed = nextLine.trimmingCharacters(in: .whitespaces)
+                    if nextLine.hasPrefix(itemPrefix) {
+                        break
+                    }
+                    if !trimmed.isEmpty,
+                       !nextLine.hasPrefix(itemIndent),
+                       !trimmed.hasPrefix("#") {
+                        break
+                    }
+                    j += 1
+                }
+
+                let blockLines = Array(hooksBody[idx..<j])
+                let blockText = blockLines.joined(separator: "\n")
+                if !markers.contains(where: { blockText.contains($0) }) {
+                    kept.append(contentsOf: blockLines)
+                }
+                idx = j
+            } else {
+                kept.append(line)
+                idx += 1
+            }
+        }
+
+        return kept
+    }
+
+    private static func detectHookItemIndent(in hooksBody: [String]) -> String {
+        for line in hooksBody {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("- ") {
+                return leadingWhitespace(of: line)
+            }
+        }
+        return "  "
+    }
+
+    private static func leadingWhitespace(of line: String) -> String {
+        String(line.prefix { $0 == " " || $0 == "\t" })
+    }
+
+    private static func buildHookBlock(command: String, itemIndent: String) -> String {
+        let propertyIndent = itemIndent + "  "
+        let matcherIndent = propertyIndent + "  "
+
+        return """
+\(itemIndent)# Coding Island hook for Coco/Trae CLI (all events)
+\(itemIndent)- type: command
+\(propertyIndent)command: \(command)
+\(propertyIndent)# Allow enough time for Island-driven permission decisions.
+\(propertyIndent)# The hook script will stop waiting early if the CLI proceeds.
+\(propertyIndent)timeout: 310s
+\(propertyIndent)matchers:
+\(matcherIndent)- event: user_prompt_submit
+\(matcherIndent)- event: pre_tool_use
+\(matcherIndent)- event: post_tool_use
+\(matcherIndent)- event: post_tool_use_failure
+\(matcherIndent)- event: permission_request
+\(matcherIndent)- event: notification
+\(matcherIndent)- event: stop
+\(matcherIndent)- event: subagent_start
+\(matcherIndent)- event: subagent_stop
+\(matcherIndent)- event: session_start
+\(matcherIndent)- event: session_end
+\(matcherIndent)- event: pre_compact
+\(matcherIndent)- event: post_compact
+"""
     }
 
     // MARK: - YAML Generation

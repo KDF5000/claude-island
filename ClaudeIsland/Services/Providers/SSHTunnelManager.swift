@@ -1001,35 +1001,37 @@ done
         }
     }
 
-    private static func buildRemoteTraeHookBlock(command: String) -> String {
-        // Keep indentation consistent with Trae/Coco YAML (2 spaces under hooks:).
+    private static func buildRemoteTraeHookBlock(command: String, itemIndent: String) -> String {
+        let propertyIndent = itemIndent + "  "
+        let matcherIndent = propertyIndent + "  "
+
         return """
-  # Coding Island hook (remote)
-  - type: command
-    command: \(command)
-    # Allow enough time for Island-driven permission decisions.
-    # The hook script will stop waiting early if the CLI proceeds.
-    timeout: 310s
-    matchers:
-      - event: user_prompt_submit
-      - event: pre_tool_use
-      - event: post_tool_use
-      - event: post_tool_use_failure
-      - event: permission_request
-      - event: notification
-      - event: stop
-      - event: subagent_start
-      - event: subagent_stop
-      - event: session_start
-      - event: session_end
-      - event: pre_compact
-      - event: post_compact
+\(itemIndent)# Coding Island hook (remote)
+\(itemIndent)- type: command
+\(propertyIndent)command: \(command)
+\(propertyIndent)# Allow enough time for Island-driven permission decisions.
+\(propertyIndent)# The hook script will stop waiting early if the CLI proceeds.
+\(propertyIndent)timeout: 310s
+\(propertyIndent)matchers:
+\(matcherIndent)- event: user_prompt_submit
+\(matcherIndent)- event: pre_tool_use
+\(matcherIndent)- event: post_tool_use
+\(matcherIndent)- event: post_tool_use_failure
+\(matcherIndent)- event: permission_request
+\(matcherIndent)- event: notification
+\(matcherIndent)- event: stop
+\(matcherIndent)- event: subagent_start
+\(matcherIndent)- event: subagent_stop
+\(matcherIndent)- event: session_start
+\(matcherIndent)- event: session_end
+\(matcherIndent)- event: pre_compact
+\(matcherIndent)- event: post_compact
 """
     }
 
     /// Inserts/updates our Coding Island hook inside a Trae/Coco YAML config.
     /// Preserves other hooks by removing only entries that reference our scripts.
-    private static func upsertCodingIslandHook(in content: String, hookBlock: String) -> String {
+    private static func upsertCodingIslandHook(in content: String, command: String) -> String {
         let markers = [
             "coding-island-remote-hook.py",
             "coding-island-coco-hook.py",
@@ -1053,16 +1055,25 @@ done
             let beforeHooks = Array(lines[0...hooksIndex])
             let hooksBody = hooksIndex + 1 < endIndex ? Array(lines[(hooksIndex + 1)..<endIndex]) : []
             let afterHooks = endIndex < lines.count ? Array(lines[endIndex...]) : []
+            let itemIndent = detectHookItemIndent(in: hooksBody)
+            let itemPrefix = itemIndent + "- "
 
             // Remove our existing hook blocks but keep other hooks.
             var kept: [String] = []
             var idx = 0
             while idx < hooksBody.count {
                 let line = hooksBody[idx]
-                if line.hasPrefix("  - ") {
+                if line.hasPrefix(itemPrefix) {
                     var j = idx + 1
                     while j < hooksBody.count {
-                        if hooksBody[j].hasPrefix("  - ") { break }
+                        let nextLine = hooksBody[j]
+                        let trimmed = nextLine.trimmingCharacters(in: .whitespaces)
+                        if nextLine.hasPrefix(itemPrefix) { break }
+                        if !trimmed.isEmpty,
+                           !nextLine.hasPrefix(itemIndent),
+                           !trimmed.hasPrefix("#") {
+                            break
+                        }
                         j += 1
                     }
                     let blockLines = Array(hooksBody[idx..<j])
@@ -1083,6 +1094,7 @@ done
             if !kept.isEmpty, kept.last != "" {
                 kept.append("")
             }
+            let hookBlock = buildRemoteTraeHookBlock(command: command, itemIndent: itemIndent)
             kept.append(contentsOf: hookBlock.components(separatedBy: "\n"))
 
             var newLines = beforeHooks
@@ -1093,15 +1105,25 @@ done
 
         // No hooks: section; append a new one.
         if content.isEmpty {
-            return "hooks:\n" + hookBlock
+            return "hooks:\n" + buildRemoteTraeHookBlock(command: command, itemIndent: "  ")
         }
         var out = content
         if !out.hasSuffix("\n") {
             out += "\n"
         }
         // Separate from previous content.
-        out += "\n" + "hooks:\n" + hookBlock
+        out += "\n" + "hooks:\n" + buildRemoteTraeHookBlock(command: command, itemIndent: "  ")
         return out
+    }
+
+    private static func detectHookItemIndent(in hooksBody: [String]) -> String {
+        for line in hooksBody {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("- ") {
+                return String(line.prefix { $0 == " " || $0 == "\t" })
+            }
+        }
+        return "  "
     }
 
     /// Ensures the remote Trae/Coco config contains the Coding Island remote hook.
@@ -1139,8 +1161,6 @@ done
         }
 
         let command = "python3 " + Self.shellSingleQuote(remoteHookAbsolutePath)
-        let hookBlock = Self.buildRemoteTraeHookBlock(command: command)
-
         // Always write to the canonical config locations users check, even if the CLI
         // ends up reading a different file on a given distro.
         var targetSet = Set(paths)
@@ -1170,7 +1190,7 @@ done
 
             logger.info("RemoteHook: read config OK host=\(hostString, privacy: .public) path=\(configPath, privacy: .public) bytes=\(existing.utf8.count, privacy: .public)")
             appendRemoteHookLog("RemoteHook: read config OK host=\(hostString) path=\(configPath) bytes=\(existing.utf8.count)")
-            let updated = Self.upsertCodingIslandHook(in: existing, hookBlock: hookBlock)
+            let updated = Self.upsertCodingIslandHook(in: existing, command: command)
             let writeResult = await writeRemoteFile(host: host, user: user, sshPort: sshPort, path: configPath, content: updated)
             switch writeResult {
             case .success:
@@ -1438,7 +1458,7 @@ exit 11
         localPort: Int = SSHTunnelManager.defaultPort
     ) async -> Result<Void, Error> {
         let baseScript = loadBundledRemoteHookScript() ?? Self.fallbackRemoteHookScript
-        let script = Self.patchRemoteHookScript(baseScript, tcpPort: tcpPort, localPort: localPort)
+        let script = Self.patchRemoteHookScript(baseScript, tcpPort: tcpPort, localPort: localPort, remoteDisplayHost: host)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
@@ -1566,10 +1586,20 @@ exit 11
         }
     }
 
-    private static func patchRemoteHookScript(_ script: String, tcpPort: Int, localPort: Int) -> String {
-        // Keep the script self-contained (no env var dependency). We patch only the TCP port
-        // constant; unix socket path stays the same.
+    private static func patchRemoteHookScript(_ script: String, tcpPort: Int, localPort: Int, remoteDisplayHost: String?) -> String {
+        // Keep the script self-contained. We patch the TCP port and the remote host label
+        // directly into the generated script so the UI can attribute remote sessions to a machine.
         var out = script
+
+        if let re = try? NSRegularExpression(pattern: "(?m)^REMOTE_DISPLAY_HOST\\s*=.*$") {
+            let range = NSRange(out.startIndex..<out.endIndex, in: out)
+            let hostLiteral: String = {
+                guard let remoteDisplayHost, !remoteDisplayHost.isEmpty else { return "None" }
+                let encoded = try? JSONEncoder().encode(remoteDisplayHost)
+                return encoded.flatMap { String(data: $0, encoding: .utf8) } ?? "None"
+            }()
+            out = re.stringByReplacingMatches(in: out, range: range, withTemplate: "REMOTE_DISPLAY_HOST = \(hostLiteral)")
+        }
 
         // Replace any `TCP_PORT = <number>` assignment.
         if let re = try? NSRegularExpression(pattern: "(?m)^TCP_PORT\\s*=\\s*\\d+\\s*$") {
@@ -1621,6 +1651,7 @@ SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
 # TCP fallback (forwarded via SSH -R 19999:127.0.0.1:19999)
 TCP_HOST = "127.0.0.1"
 TCP_PORT = 19999
+REMOTE_DISPLAY_HOST = None
 
 TIMEOUT_SECONDS = 300  # 5 minutes for permission decisions
 PROVIDER_ID = "coco-remote"  # Will be overridden by actual provider
@@ -1678,6 +1709,23 @@ def get_tty():
     except (OSError, AttributeError):
         pass
     
+    return None
+
+
+def get_remote_display_host():
+    configured = REMOTE_DISPLAY_HOST or os.environ.get("CODING_ISLAND_REMOTE_HOST")
+    if configured:
+        configured = configured.strip()
+        if configured:
+            return configured
+
+    try:
+        hostname = socket.gethostname().strip()
+        if hostname:
+            return hostname
+    except Exception:
+        pass
+
     return None
 
 
@@ -1796,6 +1844,10 @@ def main():
         "transcript_path": transcript_path,
         "remote_path_debug": _path_debug,
     }
+
+    remote_host = get_remote_display_host()
+    if remote_host:
+        state["remote_host"] = remote_host
 
     # === Event-to-status mapping ===
     

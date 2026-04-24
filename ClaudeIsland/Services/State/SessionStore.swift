@@ -159,6 +159,9 @@ actor SessionStore {
 
         session.pid = event.pid
         session.providerId = event.providerId
+        if let remoteHost = event.remoteHost?.trimmingCharacters(in: .whitespacesAndNewlines), !remoteHost.isEmpty {
+            session.remoteHost = remoteHost
+        }
         if let pid = event.pid {
             let tree = ProcessTreeBuilder.shared.buildTree()
             session.isInTmux = ProcessTreeBuilder.shared.isInTmux(pid: pid, tree: tree)
@@ -269,6 +272,7 @@ actor SessionStore {
             pid: event.pid,
             tty: event.tty?.replacingOccurrences(of: "/dev/", with: ""),
             isInTmux: false,  // Will be updated
+            remoteHost: event.remoteHost?.trimmingCharacters(in: .whitespacesAndNewlines),
             phase: .idle
         )
     }

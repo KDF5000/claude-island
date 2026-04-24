@@ -31,6 +31,7 @@ struct HookEvent: Codable, Sendable {
     let transcriptPath: String?
     let agentId: String?
     let agentType: String?
+    let remoteHost: String?
 
     /// Raw JSONL lines from the remote transcript, attached by the remote hook script.
     /// Only present for remote (TCP) events when new lines have been written since the last event.
@@ -53,6 +54,7 @@ struct HookEvent: Codable, Sendable {
         case transcriptPath = "transcript_path"
         case agentId = "agent_id"
         case agentType = "agent_type"
+        case remoteHost = "remote_host"
         case remoteJsonlLines = "remote_jsonl_lines"
         case remotePathDebug = "remote_path_debug"
         case dualApprovalMode = "dual_approval_mode"
@@ -75,6 +77,7 @@ struct HookEvent: Codable, Sendable {
         transcriptPath: String? = nil,
         agentId: String? = nil,
         agentType: String? = nil,
+        remoteHost: String? = nil,
         remoteJsonlLines: [String]? = nil,
         remotePathDebug: [String]? = nil,
         dualApprovalMode: Bool? = nil
@@ -94,6 +97,7 @@ struct HookEvent: Codable, Sendable {
         self.transcriptPath = transcriptPath
         self.agentId = agentId
         self.agentType = agentType
+        self.remoteHost = remoteHost
         self.remoteJsonlLines = remoteJsonlLines
         self.remotePathDebug = remotePathDebug
         self.dualApprovalMode = dualApprovalMode
@@ -637,6 +641,7 @@ class HookSocketServer {
                 transcriptPath: decoded.transcriptPath,
                 agentId: decoded.agentId,
                 agentType: decoded.agentType,
+                remoteHost: decoded.remoteHost,
                 remoteJsonlLines: decoded.remoteJsonlLines,
                 remotePathDebug: decoded.remotePathDebug,
                 dualApprovalMode: decoded.dualApprovalMode
@@ -687,6 +692,7 @@ class HookSocketServer {
                 transcriptPath: event.transcriptPath,
                 agentId: event.agentId,
                 agentType: event.agentType,
+                remoteHost: event.remoteHost,
                 remoteJsonlLines: event.remoteJsonlLines,
                 remotePathDebug: event.remotePathDebug,
                 dualApprovalMode: event.dualApprovalMode

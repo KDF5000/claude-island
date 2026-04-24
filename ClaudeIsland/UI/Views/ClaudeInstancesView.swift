@@ -184,6 +184,13 @@ struct InstanceRow: View {
                             ProviderBadge(providerId: session.providerId, displayName: session.providerDisplayName)
                         }
 
+                        if session.isRemoteSession, let remoteHost = session.remoteDisplayHost {
+                            Text(remoteHost)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .foregroundColor(.white.opacity(0.45))
+                                .lineLimit(1)
+                        }
+
                         // Token usage indicator
                         if session.usage.totalTokens > 0 {
                             Text("\(session.usage.formattedTotal) tokens")

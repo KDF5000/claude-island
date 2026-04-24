@@ -18,6 +18,7 @@ SOCKET_PATH = os.path.expanduser("~/.coding-island/coding-island.sock")
 # TCP fallback (forwarded via SSH -R 19999:127.0.0.1:19999)
 TCP_HOST = "127.0.0.1"
 TCP_PORT = 19999
+REMOTE_DISPLAY_HOST = None
 
 TIMEOUT_SECONDS = 300  # 5 minutes for permission decisions
 PROVIDER_ID = "coco-remote"  # Will be overridden by actual provider
@@ -85,6 +86,23 @@ def _try_get_mtime(path):
         return os.path.getmtime(path)
     except Exception:
         return None
+
+
+def get_remote_display_host():
+    configured = REMOTE_DISPLAY_HOST or os.environ.get("CODING_ISLAND_REMOTE_HOST")
+    if configured:
+        configured = configured.strip()
+        if configured:
+            return configured
+
+    try:
+        hostname = socket.gethostname().strip()
+        if hostname:
+            return hostname
+    except Exception:
+        pass
+
+    return None
 
 def send_event(state, wait_for_response=False, transcript_path=None):
     """Send event to app via SSH tunnel, return response if any"""
@@ -240,6 +258,10 @@ def main():
         "transcript_path": transcript_path,
         "remote_path_debug": _path_debug,
     }
+
+    remote_host = get_remote_display_host()
+    if remote_host:
+        state["remote_host"] = remote_host
 
     # === Event-to-status mapping ===
     
