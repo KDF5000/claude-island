@@ -62,6 +62,7 @@ actor ConversationParser {
 
     private struct CachedInfo {
         let modificationDate: Date
+        let fileSize: UInt64
         let info: ConversationInfo
     }
 
@@ -106,6 +107,14 @@ actor ConversationParser {
     func parse(sessionId: String, cwd: String) -> ConversationInfo {
         let sessionFile = Self.sessionFilePath(sessionId: sessionId, cwd: cwd)
 
+        return parseFile(atPath: sessionFile)
+    }
+
+    /// Parse a JSONL file directly from its absolute path.
+    /// Reuses the same cache as `parse(sessionId:cwd:)` so repeated full-history scans
+    /// do not re-read unchanged files.
+    func parseFile(atPath sessionFile: String) -> ConversationInfo {
+
         let fileManager = FileManager.default
         guard fileManager.fileExists(atPath: sessionFile),
               let attrs = try? fileManager.attributesOfItem(atPath: sessionFile),
@@ -113,7 +122,9 @@ actor ConversationParser {
             return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, firstUserMessage: nil, lastUserMessageDate: nil)
         }
 
-        if let cached = cache[sessionFile], cached.modificationDate == modDate {
+        let fileSize = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+
+        if let cached = cache[sessionFile], cached.modificationDate == modDate, cached.fileSize == fileSize {
             return cached.info
         }
 
@@ -123,7 +134,7 @@ actor ConversationParser {
         }
 
         let info = parseContent(content)
-        cache[sessionFile] = CachedInfo(modificationDate: modDate, info: info)
+        cache[sessionFile] = CachedInfo(modificationDate: modDate, fileSize: fileSize, info: info)
 
         return info
     }
@@ -149,6 +160,14 @@ actor ConversationParser {
                 continue
             }
 
+            if json["message"] == nil,
+               let responseMeta = json["response_meta"] as? [String: Any],
+               let usageDict = responseMeta["usage"] as? [String: Any] {
+                usage.inputTokens += usageDict["prompt_tokens"] as? Int ?? 0
+                usage.outputTokens += usageDict["completion_tokens"] as? Int ?? 0
+                continue
+            }
+
             if json["type"] as? String == "assistant" || json["message"] != nil {
                 let message: [String: Any]?
                 if let type = json["type"] as? String, type == "assistant" {
@@ -159,12 +178,23 @@ actor ConversationParser {
                     continue
                 }
 
+                // Claude Code format: message.usage.{input_tokens, output_tokens, ...}
                 if let usageDict = message?["usage"] as? [String: Any] {
                     usage.inputTokens += usageDict["input_tokens"] as? Int ?? 0
                     usage.outputTokens += usageDict["output_tokens"] as? Int ?? 0
                     usage.cacheReadTokens += usageDict["cache_read_input_tokens"] as? Int ?? 0
                     usage.cacheCreationTokens += usageDict["cache_creation_input_tokens"] as? Int ?? 0
+                    continue
                 }
+
+                // Coco / Trae CLI format: message.response_meta.usage.{prompt_tokens, completion_tokens, ...}
+                if let responseMeta = message?["response_meta"] as? [String: Any],
+                   let usageDict = responseMeta["usage"] as? [String: Any] {
+                    usage.inputTokens += usageDict["prompt_tokens"] as? Int ?? 0
+                    usage.outputTokens += usageDict["completion_tokens"] as? Int ?? 0
+                    continue
+                }
+
             }
         }
 

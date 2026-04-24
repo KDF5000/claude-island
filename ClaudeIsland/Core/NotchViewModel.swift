@@ -288,6 +288,12 @@ class NotchViewModel: ObservableObject {
         contentType = .instances
     }
 
+    func showInstances() {
+        if contentType != .instances {
+            contentType = .instances
+        }
+    }
+
     /// Perform boot animation: expand briefly then collapse
     func performBootAnimation() {
         notchOpen(reason: .boot)

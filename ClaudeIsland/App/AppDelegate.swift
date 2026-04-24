@@ -78,6 +78,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         HookInstaller.installIfNeeded()
 
+        // Start Token Statistics Manager
+        _ = TokenStatisticsManager.shared
+
         // Start session monitoring globally
         ClaudeSessionMonitor.shared.startMonitoring()
 
@@ -305,6 +308,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
     case notifications
     case systems
     case hooks
+    case tokenUsage
     case about
 
     var id: String { rawValue }
@@ -315,6 +319,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .notifications: return "Notifications"
         case .systems: return "Systems"
         case .hooks: return "Hooks"
+        case .tokenUsage: return "Token Usage"
         case .about: return "About"
         }
     }
@@ -325,6 +330,7 @@ enum SettingsSection: String, CaseIterable, Identifiable {
         case .notifications: return "bell"
         case .systems: return "server.rack"
         case .hooks: return "point.3.connected.trianglepath.dotted"
+        case .tokenUsage: return "chart.bar"
         case .about: return "info.circle"
         }
     }
@@ -373,7 +379,7 @@ private struct SettingsSidebarView: View {
     @Binding var selection: SettingsSection?
 
     private var generalSections: [SettingsSection] {
-        [.appearance, .notifications, .systems, .hooks]
+        [.appearance, .notifications, .systems, .hooks, .tokenUsage]
     }
 
     private var infoSections: [SettingsSection] {
@@ -472,7 +478,7 @@ private struct SettingsSidebarRow: View {
                 isHovering = hovering
             }
 
-            // SwiftUI 没有稳定的 cursor modifier，这里用 AppKit 提供指针反馈。
+            // SwiftUI doesn't have a stable cursor modifier; use AppKit for pointer feedback.
             if hovering {
                 if !didPushCursor {
                     NSCursor.pointingHand.push()
@@ -491,7 +497,7 @@ private struct SettingsSidebarRow: View {
                 didPushCursor = false
             }
         }
-        .accessibilityHint(isSelected ? "当前选中" : "切换到\(section.title)" )
+        .accessibilityHint(isSelected ? "Selected" : "Switch to \(section.title)")
     }
 }
 
@@ -546,6 +552,8 @@ private struct SettingsDetailView: View {
                 SystemsSettingsView()
             case .hooks:
                 HooksSettingsView(tunnelManager: sshTunnelManager)
+            case .tokenUsage:
+                TokenUsageSettingsView()
             case .about:
                 AboutSettingsView(updateManager: updateManager)
             case .none:
@@ -886,6 +894,116 @@ private struct SystemsSettingsView: View {
     }
 }
 
+// MARK: - Token Usage
+
+private struct TokenUsageSettingsView: View {
+    @ObservedObject private var statsManager = TokenStatisticsManager.shared
+
+    var body: some View {
+        SettingsPage(title: "Token Usage") {
+            SettingsSectionTitle(title: "Totals")
+            SettingsCard {
+                SettingsRow("Total tokens", subtitle: "Imported history and live session usage") {
+                    Text(statsManager.globalStats.totalTokens.formatted())
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .contentTransition(.numericText())
+                        .animation(.snappy, value: statsManager.globalStats.totalTokens)
+                }
+            }
+
+            SettingsSectionTitle(title: "History")
+            SettingsCard {
+                VStack(spacing: 0) {
+                    SettingsRow(
+                        "Historical import",
+                        subtitle: "First launch auto-imports old sessions. Rebuild if the total looks off."
+                    ) {
+                        Button(statsManager.isRebuildingHistory ? "Scanning…" : "Rebuild") {
+                            Task {
+                                await statsManager.rebuildHistoryFromDisk()
+                            }
+                        }
+                        .disabled(statsManager.isRebuildingHistory)
+                    }
+
+                    if statsManager.isRebuildingHistory {
+                        SettingsCardDivider()
+
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .controlSize(.small)
+
+                            Text("Scanning all historical session files and rebuilding token totals…")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                    }
+                }
+            }
+
+            SettingsSectionTitle(title: "By Agent")
+            SettingsCard {
+                if statsManager.globalStats.byAgent.isEmpty {
+                    SettingsRow("No data", subtitle: "No token usage recorded yet") {
+                        EmptyView()
+                    }
+                } else {
+                    let total = max(1, statsManager.globalStats.totalTokens)
+                    let sorted = statsManager.globalStats.byAgent.sorted(by: { $0.value.totalTokens > $1.value.totalTokens })
+
+                    ForEach(Array(sorted.enumerated()), id: \.element.key) { index, element in
+                        let agent = element.key
+                        let tokens = element.value.totalTokens
+
+                        VStack(spacing: 0) {
+                            SettingsRow(agent) {
+                                Text("\(statsManager.formatTokens(tokens)) tk")
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            GeometryReader { geometry in
+                                ZStack(alignment: .leading) {
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(Color(nsColor: .separatorColor).opacity(0.18))
+                                        .frame(height: 6)
+
+                                    let width = geometry.size.width * CGFloat(tokens) / CGFloat(total)
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(agentColor(for: agent))
+                                        .frame(width: max(0, width), height: 6)
+                                }
+                            }
+                            .frame(height: 6)
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 10)
+
+                            if index != sorted.count - 1 {
+                                SettingsCardDivider()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func agentColor(for agent: String) -> Color {
+        if agent == "Claude Code" {
+            return Color(red: 0.85, green: 0.47, blue: 0.34)
+        }
+        if agent == "Coco" {
+            return Color(red: 0.35, green: 0.6, blue: 0.95)
+        }
+        return Color(nsColor: .controlAccentColor)
+    }
+}
+
 private struct RemoteMachinesSettingsSection: View {
     @Binding var remoteMachines: [RemoteMachineSettings]
     @ObservedObject var tunnelManager: SSHTunnelManager
@@ -1160,7 +1278,7 @@ private struct RemoteMachineSettingsCard: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(isExpanded ? "隐藏\(titleText)详情" : "显示\(titleText)详情")
+                .accessibilityLabel(isExpanded ? "Hide \(titleText) details" : "Show \(titleText) details")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)
@@ -1616,7 +1734,7 @@ private struct HooksSettingsView: View {
                                 .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .accessibilityLabel(expandedProviderIds.contains(info.id) ? "隐藏\(info.displayName)详情" : "显示\(info.displayName)详情")
+                        .accessibilityLabel(expandedProviderIds.contains(info.id) ? "Hide \(info.displayName) details" : "Show \(info.displayName) details")
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 14)
@@ -1656,7 +1774,7 @@ private struct HooksSettingsView: View {
                             }
 
                             if isProviderUnavailable(info.id) {
-                                Text("Provider 不可用时无法安装 hooks。请先确认本机已安装对应 CLI。")
+                                Text("Can't install hooks while this provider is unavailable. Please make sure the corresponding CLI is installed on this Mac.")
                                     .font(.system(size: 11))
                                     .foregroundStyle(.tertiary)
                                     .fixedSize(horizontal: false, vertical: true)
