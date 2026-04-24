@@ -179,16 +179,13 @@ struct InstanceRow: View {
                             .foregroundColor(.white)
                             .lineLimit(1)
 
+                        if session.isRemoteSession, let remoteHost = session.remoteDisplayHost {
+                            RemoteHostBadge(host: remoteHost)
+                        }
+
                         // Provider badge (show for non-Claude providers)
                         if session.providerId != "claude-code" {
                             ProviderBadge(providerId: session.providerId, displayName: session.providerDisplayName)
-                        }
-
-                        if session.isRemoteSession, let remoteHost = session.remoteDisplayHost {
-                            Text(remoteHost)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.45))
-                                .lineLimit(1)
                         }
 
                         // Token usage indicator
@@ -551,6 +548,25 @@ struct ProviderBadge: View {
             .padding(.horizontal, 5)
             .padding(.vertical, 2)
             .background(badgeColor.opacity(0.15))
+            .clipShape(Capsule())
+    }
+}
+
+// MARK: - Remote Host Badge
+
+struct RemoteHostBadge: View {
+    let host: String
+
+    private let accent = Color(red: 0.4, green: 0.6, blue: 0.9)
+
+    var body: some View {
+        Text(host)
+            .font(.system(size: 9, weight: .medium, design: .monospaced))
+            .foregroundColor(accent)
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(accent.opacity(0.15))
             .clipShape(Capsule())
     }
 }
