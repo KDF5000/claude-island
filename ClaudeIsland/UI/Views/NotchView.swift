@@ -299,7 +299,7 @@ struct NotchView: View {
         } else {
             HStack(spacing: 0) {
             // Left side - crab + optional permission indicator (visible when processing, pending, or waiting for input)
-                if showClosedActivity {
+                if showClosedActivity && viewModel.status != .opened {
                     HStack(spacing: 4) {
                         ClaudeCrabIcon(size: 14, animateLegs: isProcessing)
                             .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: showClosedActivity)
@@ -310,39 +310,33 @@ struct NotchView: View {
                                 .matchedGeometryEffect(id: "status-indicator", in: activityNamespace, isSource: showClosedActivity)
                         }
                     }
-                    .frame(width: viewModel.status == .opened ? nil : sideWidth + (hasPendingPermission ? 18 : 0))
-                    .padding(.leading, viewModel.status == .opened ? 8 : 0)
+                    .frame(width: sideWidth + (hasPendingPermission ? 18 : 0))
                 }
 
                 // Center content
                 if viewModel.status == .opened {
                     // Opened: show header content
                     openedHeaderContent
-                } else if !showClosedActivity {
-                    // Closed without activity: empty space
+                } else {
+                    // Closed: Empty space or bouncing spacer
                     Rectangle()
                         .fill(.clear)
                         .frame(width: closedNotchSize.width - 20)
-                } else {
-                    // Closed with activity: black spacer (with optional bounce)
-                    Rectangle()
-                        .fill(.black)
-                        .frame(width: closedNotchSize.width - cornerRadiusInsets.closed.top + (isBouncing ? 16 : 0))
                 }
 
                 // Right side - spinner when processing/pending, checkmark when waiting for input
-                if showClosedActivity {
+                if showClosedActivity && viewModel.status != .opened {
                     if isProcessing || hasPendingPermission {
                         ProcessingSpinner()
                             .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
-                            .frame(width: viewModel.status == .opened ? 20 : sideWidth)
-                            .padding(.trailing, viewModel.status == .opened ? 0 : 4)
-                    } else if hasWaitingForInput && !isShowingCompletionPrompt && viewModel.status != .opened {
+                            .frame(width: sideWidth)
+                            .padding(.trailing, 4)
+                    } else if hasWaitingForInput && !isShowingCompletionPrompt {
                         // Checkmark for waiting-for-input on the right side
                         ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
                             .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
-                            .frame(width: viewModel.status == .opened ? 20 : sideWidth)
-                            .padding(.trailing, viewModel.status == .opened ? 0 : 4)
+                            .frame(width: sideWidth)
+                            .padding(.trailing, 4)
                     }
                 }
             }
@@ -412,13 +406,9 @@ struct NotchView: View {
     @ViewBuilder
     private var openedHeaderContent: some View {
         HStack(spacing: 12) {
-            // Show static crab only if not showing activity in headerRow
-            // (headerRow handles crab + indicator when showClosedActivity is true)
-            if !showClosedActivity {
-                ClaudeCrabIcon(size: 14)
-                    .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: !showClosedActivity)
-                    .padding(.leading, 8)
-            }
+            // Static crab
+            ClaudeCrabIcon(size: 14)
+                .padding(.leading, 8)
 
             Spacer()
 

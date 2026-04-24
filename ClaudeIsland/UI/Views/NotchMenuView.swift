@@ -233,7 +233,7 @@ struct RemoteSSHPickerRow: View {
                             isDisabled: false
                         ) {
                             copyToClipboard("python3 ~/.coding-island/hooks/coding-island-remote-hook.py")
-                            statusText = "已复制 hook 命令"
+                            statusText = "Copied hook command"
                             errorText = nil
                         }
 
@@ -243,13 +243,13 @@ struct RemoteSSHPickerRow: View {
                             isDisabled: normalizedHost.isEmpty
                         ) {
                             copyToClipboard(suggestedSSHCommand())
-                            statusText = "已复制 ssh 命令"
+                            statusText = "Copied SSH command"
                             errorText = nil
                         }
                     }
 
                     if !tunnelManager.isTunnelSupported {
-                        Text("未检测到系统 ssh（需要 /usr/bin/ssh）。")
+                        Text("System ssh not found (requires /usr/bin/ssh).")
                             .font(.system(size: 11))
                             .foregroundColor(Color(red: 1.0, green: 0.6, blue: 0.6).opacity(0.9))
                     }
@@ -266,7 +266,7 @@ struct RemoteSSHPickerRow: View {
                             .foregroundColor(Color(red: 1.0, green: 0.6, blue: 0.6).opacity(0.9))
                     }
 
-                    Text("提示：Connect 会在本机自动建立 ssh 反向转发（remote 127.0.0.1:\(tunnelPort) → local 127.0.0.1:\(SSHTunnelManager.defaultPort)），远端运行 hook 后即可把事件回传到 Coding Island。")
+                    Text("Tip: Connect will create a reverse SSH tunnel (remote 127.0.0.1:\(tunnelPort) -> local 127.0.0.1:\(SSHTunnelManager.defaultPort)). Run the hook on the remote machine to send events back to Coding Island.")
                         .font(.system(size: 10))
                         .foregroundColor(.white.opacity(0.35))
                         .fixedSize(horizontal: false, vertical: true)
@@ -309,7 +309,7 @@ struct RemoteSSHPickerRow: View {
         connectTask = nil
         isWorking = false
         errorText = nil
-        statusText = "已取消连接"
+        statusText = "Canceled"
         connectedTunnelId = nil
 
         let userValue = normalizedSSHIdentity.user
@@ -323,7 +323,7 @@ struct RemoteSSHPickerRow: View {
         statusText = nil
 
         guard tunnelManager.isTunnelSupported else {
-            errorText = "系统未找到 ssh：/usr/bin/ssh"
+            errorText = "ssh not found: /usr/bin/ssh"
             return
         }
 
@@ -336,13 +336,13 @@ struct RemoteSSHPickerRow: View {
             isWorking = true
             persistSettings(enabled: false)
             await tunnelManager.removeTunnels(host: normalizedHost, user: userValue, sshPort: sshPort, remotePort: tunnelPort, localPort: SSHTunnelManager.defaultPort)
-            statusText = "已断开"
+            statusText = "Disconnected"
             connectedTunnelId = nil
             return
         }
 
         guard !normalizedHost.isEmpty else {
-            errorText = "请先填写 Host"
+            errorText = "Please enter Host"
             return
         }
 
@@ -360,10 +360,10 @@ struct RemoteSSHPickerRow: View {
 
         if tunnel == nil {
             persistSettings(enabled: false)
-            errorText = tunnelManager.lastErrorMessage ?? "连接失败：ssh tunnel 未能建立（请检查 host/user/port，以及 ssh key/agent）。"
+            errorText = tunnelManager.lastErrorMessage ?? "Connection failed: SSH tunnel could not be established (check host/user/port and your SSH key/agent)."
             connectedTunnelId = nil
         } else {
-            statusText = "已连接：\(normalizedHost)"
+            statusText = "Connected: \(normalizedHost)"
             connectedTunnelId = tunnel?.id
         }
     }
@@ -373,12 +373,12 @@ struct RemoteSSHPickerRow: View {
         statusText = nil
 
         guard tunnelManager.isTunnelSupported else {
-            errorText = "系统未找到 ssh：/usr/bin/ssh"
+            errorText = "ssh not found: /usr/bin/ssh"
             return
         }
 
         guard !normalizedHost.isEmpty else {
-            errorText = "请先填写 Host"
+            errorText = "Please enter Host"
             return
         }
 
@@ -395,9 +395,9 @@ struct RemoteSSHPickerRow: View {
 
         switch result {
         case .success:
-            statusText = "已安装远端 hook：~/.coding-island/hooks/coding-island-remote-hook.py"
+            statusText = "Installed remote hook: ~/.coding-island/hooks/coding-island-remote-hook.py"
         case .failure(let error):
-            errorText = "安装失败：\(error.localizedDescription)"
+            errorText = "Install failed: \(error.localizedDescription)"
         }
     }
 

@@ -481,7 +481,7 @@ class SSHTunnelManager: ObservableObject {
                     if process.terminationStatus != 0 {
                         await MainActor.run {
                             self.lastErrorMessage = errText.isEmpty
-                                ? "SSH 隧道已断开（exit \(process.terminationStatus)）"
+                                ? "SSH tunnel disconnected (exit \(process.terminationStatus))"
                                 : errText
                         }
                     }
@@ -580,7 +580,7 @@ class SSHTunnelManager: ObservableObject {
 
                 let friendly: String
                 if errText.contains("remote port forwarding failed for listen port") {
-                    friendly = errText + "\n\n可能原因：远端端口 \(remotePort) 已被占用（已有旧 tunnel 未退出），或远端 sshd 禁用了远程端口转发（AllowTcpForwarding）。"
+                    friendly = errText + "\n\nPossible causes: remote port \(remotePort) is already in use (a previous tunnel is still running), or the remote sshd disables remote port forwarding (AllowTcpForwarding)."
                 } else {
                     friendly = errText
                 }
@@ -621,7 +621,7 @@ class SSHTunnelManager: ObservableObject {
                     if process.terminationStatus != 0 {
                         await MainActor.run {
                             self.lastErrorMessage = errText.isEmpty
-                                ? "SSH 隧道已断开（exit \(process.terminationStatus)）"
+                                ? "SSH tunnel disconnected (exit \(process.terminationStatus))"
                                 : errText
                         }
                     }
@@ -1187,7 +1187,7 @@ done
                 case .success(let afterWriteText):
                     if !afterWriteText.contains("hooks:") || !afterWriteText.contains("coding-island-remote-hook.py") {
                         let preview = String(afterWriteText.prefix(500))
-                        let message = "Remote hook 配置写入校验失败：写入后回读未包含 hooks/remote-hook 标记。\n" +
+                        let message = "Remote hook config verification failed: after write, read-back did not include the expected hooks/remote-hook markers.\n" +
                                       "path=\(configPath)\n" +
                                       "expectedHook=\(remoteHookAbsolutePath)\n" +
                                       "preview=\n\(preview)"

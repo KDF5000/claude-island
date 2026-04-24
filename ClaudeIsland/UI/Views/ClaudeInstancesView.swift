@@ -186,9 +186,11 @@ struct InstanceRow: View {
 
                         // Token usage indicator
                         if session.usage.totalTokens > 0 {
-                            Text(session.usage.formattedTotal)
+                            Text("\(session.usage.formattedTotal) tokens")
                                 .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                .foregroundColor(.white.opacity(0.3))
+                                .foregroundColor(.white.opacity(0.4))
+                                .contentTransition(.numericText())
+                                .animation(.snappy, value: session.usage.totalTokens)
                         }
                     }
 
@@ -360,7 +362,6 @@ struct InstanceRow: View {
                 .frame(width: 6, height: 6)
         }
     }
-
 }
 
 // MARK: - Inline Approval Buttons
