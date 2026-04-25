@@ -176,12 +176,8 @@ struct NotchCompletionPromptView: View {
     let leadingReservedWidth: CGFloat
     let trailingReservedWidth: CGFloat
 
-    private var maxReservedWidth: CGFloat {
-        max(leadingReservedWidth, trailingReservedWidth)
-    }
-
     private var titleContainerWidth: CGFloat {
-        max(0, contentWidth - maxReservedWidth * 2)
+        max(0, contentWidth - leadingReservedWidth - trailingReservedWidth)
     }
 
     var body: some View {

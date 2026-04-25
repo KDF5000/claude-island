@@ -91,6 +91,12 @@ struct NotchView: View {
         54
     }
 
+    /// Show completion title only on non-notched displays.
+    /// On notched MacBook screens, the centered title can be physically occluded.
+    private var shouldShowCompletionTitle: Bool {
+        !viewModel.hasPhysicalNotch
+    }
+
     // MARK: - Sizing
 
     private var closedNotchSize: CGSize {
@@ -243,8 +249,10 @@ struct NotchView: View {
             handlePendingSessionsChange(sessions)
         }
         .onChange(of: sessionMonitor.instances) { _, instances in
-            handleProcessingChange()
+            // First, handle waiting for input changes (may show completion prompt)
             handleWaitingForInputChange(instances)
+            // Then handle processing changes
+            handleProcessingChange()
         }
     }
 
@@ -292,19 +300,14 @@ struct NotchView: View {
 
     @ViewBuilder
     private var headerRow: some View {
-        if viewModel.status == .opened, let completionTitle = completionPromptTitle {
-            openedCompletionHeaderRow(title: completionTitle)
-        } else if let completionTitle = completionPromptTitle {
-            closedCompletionHeaderRow(title: completionTitle)
-        } else {
+        ZStack {
+            // Base header (always present as background layer)
             HStack(spacing: 0) {
-            // Left side - crab + optional permission indicator (visible when processing, pending, or waiting for input)
                 if showClosedActivity && viewModel.status != .opened {
                     HStack(spacing: 4) {
                         ClaudeCrabIcon(size: 14, animateLegs: isProcessing)
                             .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: showClosedActivity)
 
-                        // Permission indicator only (amber) - waiting for input shows checkmark on right
                         if hasPendingPermission {
                             PermissionIndicatorIcon(size: 14, color: Color(red: 0.85, green: 0.47, blue: 0.34))
                                 .matchedGeometryEffect(id: "status-indicator", in: activityNamespace, isSource: showClosedActivity)
@@ -313,18 +316,14 @@ struct NotchView: View {
                     .frame(width: sideWidth + (hasPendingPermission ? 18 : 0))
                 }
 
-                // Center content
                 if viewModel.status == .opened {
-                    // Opened: show header content
                     openedHeaderContent
                 } else {
-                    // Closed: Empty space or bouncing spacer
                     Rectangle()
                         .fill(.clear)
                         .frame(width: closedNotchSize.width - 20)
                 }
 
-                // Right side - spinner when processing/pending, checkmark when waiting for input
                 if showClosedActivity && viewModel.status != .opened {
                     if isProcessing || hasPendingPermission {
                         ProcessingSpinner()
@@ -332,7 +331,6 @@ struct NotchView: View {
                             .frame(width: sideWidth)
                             .padding(.trailing, 4)
                     } else if hasWaitingForInput && !isShowingCompletionPrompt {
-                        // Checkmark for waiting-for-input on the right side
                         ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
                             .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: showClosedActivity)
                             .frame(width: sideWidth)
@@ -341,7 +339,19 @@ struct NotchView: View {
                 }
             }
             .frame(height: closedNotchSize.height)
+
+            // Completion prompt overlay (on top when showing)
+            if viewModel.status == .opened, let completionTitle = completionPromptTitle {
+                openedCompletionHeaderRow(title: completionTitle)
+                    .transition(.opacity)
+                    .zIndex(10)
+            } else if let completionTitle = completionPromptTitle {
+                closedCompletionHeaderRow(title: completionTitle)
+                    .transition(.opacity)
+                    .zIndex(10)
+            }
         }
+        .frame(height: max(24, closedNotchSize.height))
     }
 
     private var sideWidth: CGFloat {
@@ -352,53 +362,55 @@ struct NotchView: View {
 
     @ViewBuilder
     private func closedCompletionHeaderRow(title: String) -> some View {
-        ZStack {
-            HStack(spacing: 0) {
-                ClaudeCrabIcon(size: 14)
-                    .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: true)
-                    .frame(width: sideWidth)
+        HStack(spacing: 0) {
+            ClaudeCrabIcon(size: 14)
+                .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: true)
+                .frame(width: sideWidth)
 
+            if shouldShowCompletionTitle {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+            } else {
                 Spacer(minLength: 0)
-
-                ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
-                    .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: true)
-                    .frame(width: sideWidth)
-                    .padding(.trailing, 4)
             }
 
-            NotchCompletionPromptView(
-                title: title,
-                contentWidth: closedCompletionPromptWidth,
-                leadingReservedWidth: sideWidth,
-                trailingReservedWidth: sideWidth + 4
-            )
+            ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
+                .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: true)
+                .frame(width: sideWidth)
+                .padding(.trailing, 4)
         }
-        .frame(width: closedCompletionPromptWidth, height: closedNotchSize.height)
+        .frame(width: closedContentWidth, height: closedNotchSize.height)
     }
 
     @ViewBuilder
     private func openedCompletionHeaderRow(title: String) -> some View {
-        ZStack {
-            HStack(spacing: 12) {
-                ClaudeCrabIcon(size: 14)
-                    .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: true)
-                    .padding(.leading, 8)
+        HStack(spacing: 12) {
+            ClaudeCrabIcon(size: 14)
+                .matchedGeometryEffect(id: "crab", in: activityNamespace, isSource: true)
+                .padding(.leading, 8)
 
+            if shouldShowCompletionTitle {
+                Text(title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+            } else {
                 Spacer(minLength: 0)
-
-                ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
-                    .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: true)
-                    .frame(width: 20)
-
-                settingsButton
             }
 
-            NotchCompletionPromptView(
-                title: title,
-                contentWidth: openedCompletionPromptWidth,
-                leadingReservedWidth: openedCompletionLeadingWidth,
-                trailingReservedWidth: openedCompletionTrailingWidth
-            )
+            ReadyForInputIndicatorIcon(size: 14, color: TerminalColors.green)
+                .matchedGeometryEffect(id: "spinner", in: activityNamespace, isSource: true)
+                .frame(width: 20)
+
+            settingsButton
         }
         .frame(width: openedCompletionPromptWidth, height: closedNotchSize.height)
     }
@@ -483,10 +495,14 @@ struct NotchView: View {
             activityCoordinator.showActivity(type: .claude)
             isVisible = true
         } else if isShowingCompletionPrompt {
+            // Keep completion prompt visible, don't hide it
             isVisible = true
         } else if hasWaitingForInput {
             // Keep visible for waiting-for-input but hide the processing spinner
-            activityCoordinator.hideActivity()
+            // Only hide if not showing completion prompt
+            if !isShowingCompletionPrompt {
+                activityCoordinator.hideActivity()
+            }
             isVisible = true
         } else {
             // Hide activity when done
@@ -509,7 +525,9 @@ struct NotchView: View {
         case .opened, .popping:
             isVisible = true
             // Clear waiting-for-input timestamps only when manually opened (user acknowledged)
-            if viewModel.openReason == .click || viewModel.openReason == .hover {
+            // Don't clear/hide on hover-open; otherwise the transient completion prompt can
+            // disappear "too fast" while the user is simply moving the mouse.
+            if viewModel.openReason == .click {
                 activityCoordinator.hideCompletionPromptIfNeeded()
                 waitingForInputTimestamps.removeAll()
             }
