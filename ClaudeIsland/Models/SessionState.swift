@@ -112,6 +112,15 @@ struct SessionState: Equatable, Identifiable, Sendable {
         phase.needsAttention
     }
 
+    /// Whether this session can be approved from the Island UI (has active socket or is local)
+    var canApproveFromIsland: Bool {
+        guard case .waitingForApproval = phase else { return false }
+        if isRemoteSession {
+            return HookSocketServer.shared.hasPendingPermission(sessionId: sessionId)
+        }
+        return true
+    }
+
     /// The active permission context, if any
     var activePermission: PermissionContext? {
         if case .waitingForApproval(let ctx) = phase {

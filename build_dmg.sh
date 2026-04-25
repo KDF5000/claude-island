@@ -8,6 +8,7 @@ VERSION=$(xcodebuild -project "$PROJECT" -showBuildSettings 2>/dev/null | grep M
 BUILD_NUMBER=$(xcodebuild -project "$PROJECT" -showBuildSettings 2>/dev/null | grep CURRENT_PROJECT_VERSION | head -1 | awk '{print $3}')
 DMG_NAME="ClaudeIsland-${VERSION}-${BUILD_NUMBER}-Release.dmg"
 BUILD_DIR="build_release"
+DMG_STAGE_DIR="$BUILD_DIR/dmg_stage"
 
 echo "==> Building ${APP_NAME} v${VERSION} (${BUILD_NUMBER})"
 
@@ -35,6 +36,11 @@ if [ ! -d "$APP_PATH" ]; then
   exit 1
 fi
 
+rm -rf "$DMG_STAGE_DIR"
+mkdir -p "$DMG_STAGE_DIR"
+cp -R "$APP_PATH" "$DMG_STAGE_DIR/"
+ln -s /Applications "$DMG_STAGE_DIR/Applications"
+
 # Remove old DMG
 rm -f "$DMG_NAME"
 
@@ -42,10 +48,12 @@ rm -f "$DMG_NAME"
 echo "==> Creating DMG..."
 hdiutil create \
   -volname "ClaudeIsland" \
-  -srcfolder "$APP_PATH" \
+  -srcfolder "$DMG_STAGE_DIR" \
   -ov \
   -format UDZO \
   "$DMG_NAME"
+
+rm -rf "$DMG_STAGE_DIR"
 
 SIZE=$(ls -lh "$DMG_NAME" | awk '{print $5}')
 echo ""

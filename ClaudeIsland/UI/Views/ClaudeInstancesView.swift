@@ -292,6 +292,17 @@ struct InstanceRow: View {
                     }
                 }
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
+            } else if isWaitingForApproval && !session.canApproveFromIsland {
+                // Remote session with expired socket — show hint instead of Allow/Deny
+                HStack(spacing: 6) {
+                    IconButton(icon: "bubble.left") {
+                        onChat()
+                    }
+                    Text("Approve in terminal")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.white.opacity(0.5))
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
             } else if isWaitingForApproval {
                 InlineApprovalButtons(
                     onChat: onChat,

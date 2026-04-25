@@ -99,6 +99,7 @@ class ClaudeSessionMonitor: ObservableObject {
             // Try to respond via hook socket first (fast path). If the tool_use_id doesn't match,
             // fall back to the most recent pending permission for the session.
             var resolvedToolUseId = permission.toolUseId
+            var terminalFallbackNeeded = false
 
             if HookSocketServer.shared.hasPendingPermission(sessionId: sessionId) {
                 let wrote = HookSocketServer.shared.respondToPermission(toolUseId: permission.toolUseId, decision: "allow")
@@ -106,15 +107,23 @@ class ClaudeSessionMonitor: ObservableObject {
                     if let pending = HookSocketServer.shared.getPendingPermission(sessionId: sessionId),
                        let actualId = pending.toolId {
                         resolvedToolUseId = actualId
-                        _ = HookSocketServer.shared.respondToPermission(toolUseId: actualId, decision: "allow")
-                    } else if !HookSocketServer.shared.hasPendingPermission(sessionId: sessionId) {
+                        let fallbackWrote = HookSocketServer.shared.respondToPermission(toolUseId: actualId, decision: "allow")
+                        if !fallbackWrote {
+                            // Both socket writes failed — fall back to terminal keystrokes
+                            terminalFallbackNeeded = true
+                        }
+                    } else {
                         // Socket path failed (write error / socket closed). Fall back to terminal keystrokes.
-                        await sendApprovalToTerminal(session: session, approve: true)
+                        terminalFallbackNeeded = true
                     }
                 }
             } else {
                 // Fallback: hook already timed out, CLI is showing its own UI.
                 // Send approval keystrokes to the terminal.
+                terminalFallbackNeeded = true
+            }
+
+            if terminalFallbackNeeded {
                 await sendApprovalToTerminal(session: session, approve: true)
             }
 
@@ -130,6 +139,7 @@ class ClaudeSessionMonitor: ObservableObject {
             }
 
             var resolvedToolUseId = permission.toolUseId
+            var terminalFallbackNeeded = false
 
             if HookSocketServer.shared.hasPendingPermission(sessionId: sessionId) {
                 let wrote = HookSocketServer.shared.respondToPermission(toolUseId: permission.toolUseId, decision: "deny", reason: reason)
@@ -137,12 +147,19 @@ class ClaudeSessionMonitor: ObservableObject {
                     if let pending = HookSocketServer.shared.getPendingPermission(sessionId: sessionId),
                        let actualId = pending.toolId {
                         resolvedToolUseId = actualId
-                        _ = HookSocketServer.shared.respondToPermission(toolUseId: actualId, decision: "deny", reason: reason)
-                    } else if !HookSocketServer.shared.hasPendingPermission(sessionId: sessionId) {
+                        let fallbackWrote = HookSocketServer.shared.respondToPermission(toolUseId: actualId, decision: "deny", reason: reason)
+                        if !fallbackWrote {
+                            terminalFallbackNeeded = true
+                        }
+                    } else {
                         await sendApprovalToTerminal(session: session, approve: false)
                     }
                 }
             } else {
+                await sendApprovalToTerminal(session: session, approve: false)
+            }
+
+            if terminalFallbackNeeded {
                 await sendApprovalToTerminal(session: session, approve: false)
             }
 
@@ -155,6 +172,13 @@ class ClaudeSessionMonitor: ObservableObject {
     /// Send approval/denial keystrokes to the terminal when the hook socket is no longer available.
     private func sendApprovalToTerminal(session: SessionState, approve: Bool) async {
         let isCocoLike = (session.providerId == "coco" || session.providerId == "coco-remote")
+
+        // Remote sessions: the CLI runs on a remote machine — local terminal keystrokes
+        // cannot reach it.  The user must approve in the remote terminal directly.
+        if session.isRemoteSession {
+            NSLog("ClaudeIsland: Cannot send keystrokes to remote session \(session.id.prefix(8)) — user must approve in remote terminal")
+            return
+        }
 
         if session.isInTmux, let tty = session.tty {
             // tmux session: use ToolApprovalHandler (tmux send-keys)
@@ -179,7 +203,7 @@ class ClaudeSessionMonitor: ObservableObject {
             // Non-tmux session: we cannot inject input by writing to /dev/tty (that only prints).
             // Instead, activate the owning terminal app and send real keystrokes via AppleScript.
             let terminalBundleId = await focusTerminalApp(forSessionPid: pid)
-            try? await Task.sleep(for: .milliseconds(120))
+            try? await Task.sleep(for: .milliseconds(200))
 
             // iTerm2: prefer its AppleScript API so we don't depend on Accessibility keystroke injection.
             // This also helps when System Events keystrokes are blocked.
@@ -193,11 +217,16 @@ class ClaudeSessionMonitor: ObservableObject {
                 // Trae/Coco selector: Enter confirms current selection (default is Yes), Esc cancels.
                 if approve {
                     await sendKeystrokesViaAppleScript(keys: ["Return"])
+                    // Retry after a short delay in case the terminal wasn't ready
+                    try? await Task.sleep(for: .milliseconds(300))
+                    await sendKeystrokesViaAppleScript(keys: ["Return"])
                 } else {
                     await sendKeystrokesViaAppleScript(keys: ["Escape"])
                 }
             } else {
                 let key = approve ? "1" : "n"
+                await sendKeystrokesViaAppleScript(keys: [key, "Return"])
+                try? await Task.sleep(for: .milliseconds(300))
                 await sendKeystrokesViaAppleScript(keys: [key, "Return"])
             }
         } else {

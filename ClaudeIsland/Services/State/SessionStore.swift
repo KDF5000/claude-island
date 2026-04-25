@@ -903,13 +903,19 @@ actor SessionStore {
 
         await transitionCocoSessionToWaitingForInputIfNeeded(
             sessionId: payload.sessionId,
-            sawAgentEnd: payload.sawAgentEnd
+            sawAgentEnd: payload.sawAgentEnd,
+            completedToolIds: payload.completedToolIds,
+            toolResults: payload.toolResults,
+            structuredResults: payload.structuredResults
         )
     }
 
     private func transitionCocoSessionToWaitingForInputIfNeeded(
         sessionId: String,
-        sawAgentEnd: Bool
+        sawAgentEnd: Bool,
+        completedToolIds: Set<String>,
+        toolResults: [String: ConversationParser.ToolResult],
+        structuredResults: [String: ToolResultData]
     ) async {
         guard sawAgentEnd, var session = sessions[sessionId] else { return }
 
@@ -918,6 +924,33 @@ actor SessionStore {
         // alive for the next prompt, but the UI would remain stuck in `.processing`.
         let isCocoSession = session.providerId == "coco" || session.providerId == "coco-remote"
         let hasPendingPermission = HookSocketServer.shared.hasPendingPermission(sessionId: sessionId)
+
+        // If Coco wrote `agent_end` but we still have hook-created placeholder tools
+        // that never appeared in JSONL, they can keep the UI stuck in `.processing`.
+        // Treat those as stale and mark them interrupted so phase can settle.
+        if isCocoSession && !hasPendingPermission {
+            let transcriptToolIds = completedToolIds
+                .union(toolResults.keys)
+                .union(structuredResults.keys)
+
+            var didMutateTools = false
+            for i in 0..<session.chatItems.count {
+                guard case .toolCall(var tool) = session.chatItems[i].type else { continue }
+                guard tool.status == .running else { continue }
+                guard !transcriptToolIds.contains(session.chatItems[i].id) else { continue }
+                tool.status = .interrupted
+                session.chatItems[i] = ChatHistoryItem(
+                    id: session.chatItems[i].id,
+                    type: .toolCall(tool),
+                    timestamp: session.chatItems[i].timestamp
+                )
+                didMutateTools = true
+            }
+            if didMutateTools {
+                Self.logger.debug("[Coco] Marked stale placeholder tools as interrupted for session \(sessionId.prefix(8), privacy: .public)")
+            }
+        }
+
         let hasRunningTool = session.chatItems.contains { item in
             guard case .toolCall(let tool) = item.type else { return false }
             return tool.status == .running
@@ -928,7 +961,7 @@ actor SessionStore {
         }
 
         if isCocoSession,
-           session.phase == .processing,
+           (session.phase == .processing || session.phase == .compacting),
            !hasPendingPermission,
            !hasRunningTool,
            !hasWaitingApprovalTool,
