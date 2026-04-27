@@ -39,6 +39,10 @@ Pods/
 # Release artifacts
 releases/
 
+# Python
+__pycache__/
+*.pyc
+
 # Xcode backup
 *.xcodeproj.backup/
 CLAUDE.md

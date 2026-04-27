@@ -9,6 +9,24 @@ EXPORT_PATH="$BUILD_DIR/export"
 RELEASE_DIR="$PROJECT_DIR/releases"
 KEYS_DIR="$PROJECT_DIR/.sparkle-keys"
 
+# Apple Developer Team ID (used in setup instructions).
+# If you have multiple teams, override via CODING_ISLAND_TEAM_ID.
+TEAM_ID_DEFAULT="4U87V5XYY4"
+TEAM_ID="${CODING_ISLAND_TEAM_ID:-$TEAM_ID_DEFAULT}"
+
+IS_INTERACTIVE=0
+if [[ -t 0 && -t 1 ]]; then
+    IS_INTERACTIVE=1
+fi
+
+SKIP_NOTARIZATION_FLAG="${CODING_ISLAND_SKIP_NOTARIZATION:-}"
+DEPLOY_WEBSITE_FLAG="${CODING_ISLAND_DEPLOY_WEBSITE:-}"
+
+SKIP_NOTARIZATION=""
+if [[ "$SKIP_NOTARIZATION_FLAG" == "1" || "$SKIP_NOTARIZATION_FLAG" == "true" ]]; then
+    SKIP_NOTARIZATION=true
+fi
+
 # GitHub repository (owner/repo format)
 GITHUB_REPO="farouqaldori/claude-island"
 
@@ -44,6 +62,23 @@ mkdir -p "$RELEASE_DIR"
 # ============================================
 echo "=== Step 1: Notarizing ==="
 
+# Notarization for Gatekeeper distribution requires the app to be signed with
+# a Developer ID Application certificate.
+if ! /usr/bin/codesign -dv --verbose=4 "$APP_PATH" 2>&1 | grep -q "Authority=Developer ID Application"; then
+    if [ -n "$SKIP_NOTARIZATION" ]; then
+        echo "WARNING: App is not Developer ID signed; skipping notarization (CODING_ISLAND_SKIP_NOTARIZATION=1)."
+    else
+        echo "ERROR: $APP_PATH is not signed with a Developer ID Application certificate."
+        echo "Install a 'Developer ID Application' certificate (with private key), then rebuild."
+        echo "Or set CODING_ISLAND_SKIP_NOTARIZATION=1 to produce an unsigned/not-notarized DMG."
+        exit 1
+    fi
+fi
+
+if [ -n "$SKIP_NOTARIZATION" ]; then
+    echo "Notarization skipped."
+else
+
 # Check if keychain profile exists
 if ! xcrun notarytool history --keychain-profile "$KEYCHAIN_PROFILE" &>/dev/null; then
     echo ""
@@ -51,18 +86,25 @@ if ! xcrun notarytool history --keychain-profile "$KEYCHAIN_PROFILE" &>/dev/null
     echo ""
     echo "  xcrun notarytool store-credentials \"$KEYCHAIN_PROFILE\" \\"
     echo "      --apple-id \"your@email.com\" \\"
-    echo "      --team-id \"2DKS5U9LV4\" \\"
+    echo "      --team-id \"$TEAM_ID\" \\" 
     echo "      --password \"xxxx-xxxx-xxxx-xxxx\""
     echo ""
     echo "Create an app-specific password at: https://appleid.apple.com"
     echo ""
-    read -p "Skip notarization for now? (y/N) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+
+    if [[ "$IS_INTERACTIVE" == "1" ]]; then
+        read -p "Skip notarization for now? (y/N) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+        SKIP_NOTARIZATION=true
+        echo "WARNING: Skipping notarization. Users will see Gatekeeper warnings!"
+    else
+        echo "ERROR: notarytool profile '$KEYCHAIN_PROFILE' not found and running non-interactively."
+        echo "Set CODING_ISLAND_SKIP_NOTARIZATION=1 to proceed without notarization."
         exit 1
     fi
-    SKIP_NOTARIZATION=true
-    echo "WARNING: Skipping notarization. Users will see Gatekeeper warnings!"
 else
     # Create zip for notarization
     ZIP_PATH="$BUILD_DIR/$APP_NAME-$VERSION.zip"
@@ -79,6 +121,8 @@ else
 
     rm "$ZIP_PATH"
     echo "Notarization complete!"
+fi
+
 fi
 
 echo ""
@@ -273,9 +317,22 @@ EOF
 
     WRANGLER_PROJECT="${CODING_ISLAND_WRANGLER_PROJECT:-codingisland-website}"
 
-    read -p "Deploy website to Cloudflare Pages ($WRANGLER_PROJECT)? (Y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+    SHOULD_DEPLOY=0
+    if [[ "$DEPLOY_WEBSITE_FLAG" == "1" || "$DEPLOY_WEBSITE_FLAG" == "true" ]]; then
+        SHOULD_DEPLOY=1
+    elif [[ "$DEPLOY_WEBSITE_FLAG" == "0" || "$DEPLOY_WEBSITE_FLAG" == "false" ]]; then
+        SHOULD_DEPLOY=0
+    elif [[ "$IS_INTERACTIVE" == "1" ]]; then
+        read -p "Deploy website to Cloudflare Pages ($WRANGLER_PROJECT)? (Y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            SHOULD_DEPLOY=1
+        fi
+    else
+        SHOULD_DEPLOY=0
+    fi
+
+    if [[ "$SHOULD_DEPLOY" == "1" ]]; then
         if ! command -v wrangler >/dev/null 2>&1; then
             echo "ERROR: wrangler not found. Install with: npm install -g wrangler"
             echo "Skipping website deploy. Appcast updated locally at $WEBSITE_PUBLIC/appcast.xml"
