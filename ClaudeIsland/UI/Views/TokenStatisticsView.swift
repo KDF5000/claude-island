@@ -171,6 +171,8 @@ struct TokenStatisticsView: View {
             return Color(red: 0.85, green: 0.47, blue: 0.34) // Claude orange
         } else if agent == "Coco" {
             return Color(red: 0.35, green: 0.6, blue: 0.95) // Coco blue
+        } else if agent == "Codex" {
+            return Color(red: 0.62, green: 0.52, blue: 0.95) // Codex purple
         } else {
             return Color.white.opacity(0.6)
         }

@@ -1304,7 +1304,9 @@ actor SessionStore {
             }
 
             var hasNewCompletions = false
+            var isCodexSession = false
             if let session = await self?.session(for: sessionId) {
+                isCodexSession = (session.providerId == "codex" || session.providerId == "codex-remote")
                 for item in session.chatItems {
                     if case .toolCall(let tool) = item.type,
                        (tool.status == .running || tool.status == .waitingForApproval),
@@ -1317,7 +1319,7 @@ actor SessionStore {
 
             // `agent_end` 可能是这一轮最后写入的 JSONL 行，但它通常不会带来新的 message/tool_result。
             // 如果我们在这里直接跳过 fileUpdated，会导致 UI 卡在 `.processing`。
-            guard !result.newMessages.isEmpty || result.clearDetected || hasNewCompletions || result.sawAgentEnd else {
+            guard !result.newMessages.isEmpty || result.clearDetected || hasNewCompletions || result.sawAgentEnd || (isCodexSession && result.didReadNewBytes) else {
                 Self.logger.info("[Sync] No new messages/completions/agent_end for \(sessionId.prefix(8), privacy: .public), skipping fileUpdated")
                 return
             }

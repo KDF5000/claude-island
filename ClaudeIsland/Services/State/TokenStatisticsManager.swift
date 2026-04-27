@@ -270,7 +270,82 @@ final class TokenStatisticsManager: ObservableObject {
             }
         }
 
+        // Codex sessions (~/.codex/sessions/**/rollout-*.jsonl)
+        let codexSessionsDir = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/sessions")
+
+        if let enumerator = fileManager.enumerator(
+            at: codexSessionsDir,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let fileURL as URL in enumerator {
+                guard fileURL.pathExtension == "jsonl" else { continue }
+                guard let sessionId = inferCodexSessionId(for: fileURL.path) else { continue }
+                register(
+                    sessionId: sessionId,
+                    filePath: fileURL.path,
+                    agentId: "Codex",
+                    priority: 1
+                )
+            }
+        }
+
         return candidates
+    }
+
+    nonisolated private static func inferCodexSessionId(for filePath: String) -> String? {
+        guard let handle = FileHandle(forReadingAtPath: filePath) else { return nil }
+        defer { try? handle.close() }
+
+        // Codex session_meta line can be very large (base instructions), so do not assume
+        // it fits in a small prefix read. Read until the first newline (or a safe cap).
+        let maxBytes = 1_048_576 // 1MB cap for the first line
+        let chunkSize = 32_768
+        var buffer = Data()
+
+        while buffer.count < maxBytes {
+            let chunkOpt: Data?
+            do {
+                chunkOpt = try handle.read(upToCount: chunkSize)
+            } catch {
+                chunkOpt = nil
+            }
+
+            guard let chunk = chunkOpt, !chunk.isEmpty else {
+                break
+            }
+
+            buffer.append(chunk)
+            if buffer.contains(UInt8(0x0A)) { // '\n'
+                break
+            }
+        }
+
+        let lineData: Data
+        if let newlineIdx = buffer.firstIndex(of: UInt8(0x0A)) {
+            lineData = buffer.prefix(upTo: newlineIdx)
+        } else {
+            lineData = buffer
+        }
+
+        if let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+           (json["type"] as? String) == "session_meta",
+           let payload = json["payload"] as? [String: Any],
+           let id = payload["id"] as? String,
+           !id.isEmpty {
+            return id
+        }
+
+        // Fallback: attempt to extract the id with a lightweight string search.
+        guard let prefix = String(data: lineData, encoding: .utf8) else { return nil }
+        guard prefix.contains("\"type\":\"session_meta\"") else { return nil }
+        let needle = "\"id\":\""
+        guard let startRange = prefix.range(of: needle) else { return nil }
+        let after = prefix[startRange.upperBound...]
+        guard let endQuote = after.firstIndex(of: "\"") else { return nil }
+        let id = String(after[..<endQuote])
+        return id.isEmpty ? nil : id
     }
 
     nonisolated private static func inferAgentId(for filePath: String, fallback: String) -> String {
@@ -330,7 +405,16 @@ final class TokenStatisticsManager: ObservableObject {
     }
 
     private func agentId(for session: SessionState) -> String {
-        session.providerId == "claude-code" ? "Claude Code" : "Coco"
+        switch session.providerId {
+        case "claude-code":
+            return "Claude Code"
+        case "codex", "codex-remote":
+            return "Codex"
+        case "coco", "coco-remote":
+            return "Coco"
+        default:
+            return session.providerDisplayName
+        }
     }
 
     @discardableResult

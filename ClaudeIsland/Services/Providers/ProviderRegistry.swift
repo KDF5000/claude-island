@@ -42,6 +42,7 @@ class ProviderRegistry: ObservableObject {
         // Register built-in providers
         register(ClaudeProviderFactory.self)
         register(CocoProviderFactory.self)
+        register(CodexProviderFactory.self)
     }
 
     // MARK: - Registration

@@ -45,6 +45,10 @@ struct ConversationInfo: Equatable {
 actor ConversationParser {
     static let shared = ConversationParser()
 
+    /// Bump this when parsing behavior changes in a way that should invalidate cached results.
+    /// (e.g. adding support for new transcript formats like Codex token_count events)
+    private static let cacheVersion: Int = 2
+
     /// Logger for conversation parser (nonisolated static for cross-context access)
     nonisolated static let logger = Logger(subsystem: "com.codingisland", category: "Parser")
 
@@ -61,9 +65,28 @@ actor ConversationParser {
     private var incrementalState: [String: IncrementalParseState] = [:]
 
     private struct CachedInfo {
+        let version: Int
         let modificationDate: Date
         let fileSize: UInt64
         let info: ConversationInfo
+    }
+
+    // MARK: - Codex Session Path Cache
+
+    /// Codex session files are not stored as `<sessionId>.jsonl` so we cache resolved paths.
+    nonisolated(unsafe) private static var codexSessionPathCache: [String: String] = [:]
+    nonisolated(unsafe) private static let codexSessionPathLock = NSLock()
+
+    nonisolated private static func cachedCodexSessionPath(for sessionId: String) -> String? {
+        codexSessionPathLock.lock()
+        defer { codexSessionPathLock.unlock() }
+        return codexSessionPathCache[sessionId]
+    }
+
+    nonisolated private static func setCachedCodexSessionPath(_ path: String, for sessionId: String) {
+        codexSessionPathLock.lock()
+        codexSessionPathCache[sessionId] = path
+        codexSessionPathLock.unlock()
     }
 
     /// State for incremental JSONL parsing
@@ -124,7 +147,10 @@ actor ConversationParser {
 
         let fileSize = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
 
-        if let cached = cache[sessionFile], cached.modificationDate == modDate, cached.fileSize == fileSize {
+        if let cached = cache[sessionFile],
+           cached.version == Self.cacheVersion,
+           cached.modificationDate == modDate,
+           cached.fileSize == fileSize {
             return cached.info
         }
 
@@ -134,7 +160,7 @@ actor ConversationParser {
         }
 
         let info = parseContent(content)
-        cache[sessionFile] = CachedInfo(modificationDate: modDate, fileSize: fileSize, info: info)
+        cache[sessionFile] = CachedInfo(version: Self.cacheVersion, modificationDate: modDate, fileSize: fileSize, info: info)
 
         return info
     }
@@ -151,12 +177,33 @@ actor ConversationParser {
         var lastUserMessageDate: Date?
         var usage = UsageInfo()
 
+        // Codex format reports cumulative token usage via event_msg/token_count.
+        // We take the maximum cumulative totals observed in the file.
+        var sawCodexTokenCount = false
+        var codexMaxInput = 0
+        var codexMaxOutput = 0
+        var codexMaxCached = 0
+
         let formatter = isoFormatter
 
         // First pass: collect usage from all assistant messages
         for line in lines {
             guard let lineData = line.data(using: .utf8),
                   let json = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+                continue
+            }
+
+            // Codex CLI format: {"type":"event_msg","payload":{"type":"token_count","info":{...}}}
+            if let recordType = json["type"] as? String,
+               recordType == "event_msg",
+               let payload = json["payload"] as? [String: Any],
+               (payload["type"] as? String) == "token_count",
+               let info = payload["info"] as? [String: Any],
+               let total = info["total_token_usage"] as? [String: Any] {
+                sawCodexTokenCount = true
+                if let v = total["input_tokens"] as? Int { codexMaxInput = max(codexMaxInput, v) }
+                if let v = total["output_tokens"] as? Int { codexMaxOutput = max(codexMaxOutput, v) }
+                if let v = total["cached_input_tokens"] as? Int { codexMaxCached = max(codexMaxCached, v) }
                 continue
             }
 
@@ -196,6 +243,12 @@ actor ConversationParser {
                 }
 
             }
+        }
+
+        if sawCodexTokenCount {
+            usage.inputTokens = codexMaxInput
+            usage.outputTokens = codexMaxOutput
+            usage.cacheReadTokens = codexMaxCached
         }
 
         for line in lines {
@@ -439,6 +492,8 @@ actor ConversationParser {
         let structuredResults: [String: ToolResultData]
         let clearDetected: Bool
         let sawAgentEnd: Bool
+        /// Whether the file had new bytes since last parse (even if no messages were parsed)
+        let didReadNewBytes: Bool
     }
 
     /// Parse only NEW messages since last call (efficient incremental updates)
@@ -454,7 +509,8 @@ actor ConversationParser {
                 toolResults: [:],
                 structuredResults: [:],
                 clearDetected: false,
-                sawAgentEnd: false
+                sawAgentEnd: false,
+                didReadNewBytes: false
             )
         }
 
@@ -473,7 +529,8 @@ actor ConversationParser {
             toolResults: state.toolResults,
             structuredResults: state.structuredResults,
             clearDetected: clearDetected,
-            sawAgentEnd: parseResult.sawAgentEnd
+            sawAgentEnd: parseResult.sawAgentEnd,
+            didReadNewBytes: parseResult.didReadNewBytes
         )
     }
 
@@ -488,10 +545,10 @@ actor ConversationParser {
     }
 
     /// Parse only new lines since last read (incremental)
-    private func parseNewLines(filePath: String, state: inout IncrementalParseState) -> (messages: [ChatMessage], sawAgentEnd: Bool) {
+    private func parseNewLines(filePath: String, state: inout IncrementalParseState) -> (messages: [ChatMessage], sawAgentEnd: Bool, didReadNewBytes: Bool) {
         guard let fileHandle = FileHandle(forReadingAtPath: filePath) else {
             Self.logger.warning("[Parser] Cannot open file: \(filePath, privacy: .public)")
-            return ([], false)
+            return ([], false, false)
         }
         defer { try? fileHandle.close() }
 
@@ -499,7 +556,7 @@ actor ConversationParser {
         do {
             fileSize = try fileHandle.seekToEnd()
         } catch {
-            return ([], false)
+            return ([], false, false)
         }
 
         let offsetCopy = state.lastFileOffset
@@ -512,18 +569,18 @@ actor ConversationParser {
 
         if fileSize == state.lastFileOffset {
             Self.logger.info("[Parser] No new bytes, returning empty")
-            return ([], false)
+            return ([], false, false)
         }
 
         do {
             try fileHandle.seek(toOffset: state.lastFileOffset)
         } catch {
-            return (state.messages, false)
+            return (state.messages, false, false)
         }
 
         guard let newData = try? fileHandle.readToEnd(),
               let newContent = String(data: newData, encoding: .utf8) else {
-            return (state.messages, false)
+            return (state.messages, false, false)
         }
 
         state.clearPending = false
@@ -693,7 +750,7 @@ actor ConversationParser {
         let totalMessages = state.messages.count
         Self.logger.info("[Parser] Done: newMessages=\(newMessages.count) totalMessages=\(totalMessages)")
         state.lastFileOffset = fileSize
-        return (newMessages, sawAgentEnd)
+        return (newMessages, sawAgentEnd, true)
     }
 
     /// Get set of completed tool IDs for a session
@@ -750,6 +807,31 @@ actor ConversationParser {
         if FileManager.default.fileExists(atPath: cocoPath) {
             logger.info("[Parser] sessionFilePath: using coco path for \(sessionId.prefix(8), privacy: .public)")
             return cocoPath
+        }
+
+        // 4. Local Codex sessions
+        if let cached = cachedCodexSessionPath(for: sessionId), FileManager.default.fileExists(atPath: cached) {
+            logger.info("[Parser] sessionFilePath: using cached codex path for \(sessionId.prefix(8), privacy: .public)")
+            return cached
+        }
+
+        let codexRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".codex/sessions")
+        if let enumerator = FileManager.default.enumerator(
+            at: codexRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let fileURL as URL in enumerator {
+                guard fileURL.pathExtension == "jsonl" else { continue }
+                let name = fileURL.lastPathComponent
+                // Codex session files are typically named like: rollout-<timestamp>-<sessionId>.jsonl
+                guard name.contains(sessionId) else { continue }
+                let resolved = fileURL.path
+                setCachedCodexSessionPath(resolved, for: sessionId)
+                logger.info("[Parser] sessionFilePath: using codex path for \(sessionId.prefix(8), privacy: .public)")
+                return resolved
+            }
         }
 
         // Return claudePath as default if none exists

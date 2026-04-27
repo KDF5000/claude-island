@@ -547,6 +547,8 @@ struct ProviderBadge: View {
             return Color(red: 0.85, green: 0.47, blue: 0.34)  // Claude orange
         case "coco", "coco-remote":
             return Color(red: 0.4, green: 0.6, blue: 0.9)  // Blue for Coco
+        case "codex", "codex-remote":
+            return Color(red: 0.62, green: 0.52, blue: 0.95) // Purple for Codex
         default:
             return Color.white.opacity(0.3)
         }

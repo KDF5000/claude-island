@@ -47,6 +47,16 @@ enum IslandPaths {
         shellQuote(cocoHookScriptPath.path)
     }
 
+    /// Codex hook script: ~/.coding-island/hooks/coding-island-codex-hook.py
+    static var codexHookScriptPath: URL {
+        hooksDir.appendingPathComponent("coding-island-codex-hook.py")
+    }
+
+    /// Shell-safe path for Codex hook commands
+    static var codexHookScriptShellPath: String {
+        shellQuote(codexHookScriptPath.path)
+    }
+
     /// Remote hook script: ~/.coding-island/hooks/coding-island-remote-hook.py
     static var remoteHookScriptPath: URL {
         hooksDir.appendingPathComponent("coding-island-remote-hook.py")
