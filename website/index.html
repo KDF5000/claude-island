@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Coding Island — Dynamic Island for AI Coding Agents</title>
+<meta name="description" content="A macOS menu bar app that brings Dynamic Island-style notifications to your AI coding agent sessions. Monitor, approve, and jump back — without leaving your flow.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#050608;
+  --surface:rgba(255,255,255,0.04);
+  --surface-hover:rgba(255,255,255,0.07);
+  --border:rgba(255,255,255,0.08);
+  --orange:#FF8A4C;
+  --orange-dim:rgba(255,138,76,0.15);
+  --blue:#6699EE;
+  --green:#4ADE80;
+  --text:#F4F5F8;
+  --text-secondary:rgba(255,255,255,0.5);
+  --radius:16px;
+  --max-w:1120px;
+}
+html{scroll-behavior:smooth;-webkit-font-smoothing:antialiased}
+body{
+  font-family:'Inter',system-ui,-apple-system,sans-serif;
+  background:var(--bg);color:var(--text);
+  line-height:1.6;overflow-x:hidden;
+}
+
+/* Noise overlay */
+body::before{
+  content:'';position:fixed;inset:0;z-index:9999;pointer-events:none;
+  opacity:0.035;
+  background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-repeat:repeat;background-size:180px;
+}
+
+a{color:inherit;text-decoration:none}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 24px}
+
+/* ─── NAV ─── */
+nav{
+  position:fixed;top:0;left:0;right:0;z-index:100;
+  padding:16px 0;transition:all .3s;
+}
+nav.scrolled{
+  background:rgba(5,6,8,0.82);backdrop-filter:blur(20px) saturate(1.4);
+  border-bottom:1px solid var(--border);
+}
+nav .container{display:flex;align-items:center;justify-content:space-between}
+.nav-logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:16px;letter-spacing:-0.02em}
+.nav-logo .icon{
+  width:28px;height:28px;border-radius:7px;
+  overflow:hidden;flex-shrink:0;
+}
+.nav-logo .icon img{width:100%;height:100%;display:block}
+.nav-links{display:flex;align-items:center;gap:28px}
+.nav-links a:not(.btn){font-size:14px;color:var(--text-secondary);transition:color .2s}
+.nav-links a:not(.btn):hover{color:var(--text)}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:10px 20px;border-radius:10px;font-size:14px;font-weight:600;
+  transition:all .2s;cursor:pointer;border:none;
+}
+.btn-primary{background:var(--orange);color:#fff}
+.btn-primary:hover{background:#FF9D6A;transform:translateY(-1px);box-shadow:0 4px 20px rgba(255,138,76,0.3)}
+.btn-secondary{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.btn-secondary:hover{background:var(--surface-hover);border-color:rgba(255,255,255,0.14)}
+.btn-sm{padding:8px 16px;font-size:13px;border-radius:8px}
+
+/* ─── HERO ─── */
+.hero{
+  padding:160px 0 80px;text-align:center;position:relative;overflow:hidden;
+}
+.hero::before{
+  content:'';position:absolute;top:-120px;left:50%;transform:translateX(-50%);
+  width:800px;height:600px;
+  background:radial-gradient(ellipse,rgba(255,138,76,0.12) 0%,rgba(255,138,76,0.03) 40%,transparent 70%);
+  pointer-events:none;
+}
+.hero-badge{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:6px 16px;border-radius:999px;
+  background:var(--surface);border:1px solid var(--border);
+  font-size:13px;color:var(--text-secondary);margin-bottom:24px;
+}
+.hero-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+.hero h1{
+  font-size:clamp(40px,6vw,72px);font-weight:800;line-height:1.06;
+  letter-spacing:-0.035em;max-width:800px;margin:0 auto 20px;
+  padding-bottom:4px;
+  background:linear-gradient(180deg,#fff 40%,rgba(255,255,255,0.5));
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;
+}
+.hero p{
+  font-size:clamp(16px,2vw,20px);color:var(--text-secondary);
+  max-width:540px;margin:0 auto 36px;line-height:1.5;
+}
+.hero-ctas{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+
+/* ─── NOTCH MOCKUP ─── */
+.mockup-wrapper{
+  margin:64px auto 0;max-width:680px;position:relative;
+}
+.mockup-glow{
+  position:absolute;top:-40px;left:50%;transform:translateX(-50%);
+  width:500px;height:300px;
+  background:radial-gradient(ellipse,rgba(255,138,76,0.1),transparent 70%);
+  pointer-events:none;filter:blur(40px);
+}
+
+/* Desktop backdrop — simulates the macOS desktop behind the panel */
+.desktop-backdrop{
+  position:relative;
+  border-radius:16px;overflow:hidden;
+  /* macOS Sequoia-style gradient wallpaper */
+  background:
+    radial-gradient(ellipse at 30% 70%, rgba(180,40,80,0.35) 0%, transparent 50%),
+    radial-gradient(ellipse at 70% 80%, rgba(40,120,60,0.3) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 30%, rgba(30,30,60,0.6) 0%, transparent 60%),
+    linear-gradient(160deg, #1a1028 0%, #0c1a1a 50%, #0d0f18 100%);
+  min-height:380px;
+  box-shadow:0 2px 60px rgba(0,0,0,0.5);
+  border:1px solid rgba(255,255,255,0.08);
+}
+
+/* Faint menu bar at top of "screen" */
+.desktop-menubar{
+  height:26px;display:flex;align-items:center;justify-content:space-between;
+  padding:0 12px;
+  background:rgba(0,0,0,0.25);backdrop-filter:blur(30px);
+  font-size:11px;color:rgba(255,255,255,0.55);
+  position:relative;z-index:1;
+}
+.desktop-menubar-left{display:flex;align-items:center;gap:14px}
+.desktop-menubar-left .app-name{font-weight:600;color:rgba(255,255,255,0.7)}
+.desktop-menubar-right{display:flex;align-items:center;gap:10px}
+
+/* The Island panel — the star of the show */
+.island-panel{
+  position:absolute;
+  top:0;left:50%;transform:translateX(-50%);
+  width:min(380px, 56%);
+  background:#000;
+  border-radius:0 0 26px 26px;
+  z-index:5;
+  box-shadow:
+    0 12px 48px rgba(0,0,0,0.65),
+    0 0 0 0.5px rgba(255,255,255,0.08);
+}
+
+/* Notch "ears" — smooth concave curves where the panel meets the screen top edge.
+   Uses the inverted-border-radius trick: a box-shadow on a rounded element
+   creates the illusion of a concave cutout flowing from the top edge into the panel. */
+.notch-ear{
+  position:absolute;top:0;
+  width:16px;height:16px;
+  background:transparent;
+  overflow:hidden;pointer-events:none;z-index:6;
+}
+.notch-ear-left{left:-16px}
+.notch-ear-right{right:-16px}
+.notch-ear::before{
+  content:'';position:absolute;
+  width:32px;height:32px;border-radius:50%;
+  background:transparent;
+  box-shadow:0 0 0 40px #000;
+}
+.notch-ear-left::before{right:0;top:0}
+.notch-ear-right::before{left:0;top:0}
+
+.island-inner{padding:0 0 14px}
+
+/* Notch header — icon and gear sit INSIDE the notch area (top 28px) */
+.notch-header{
+  height:28px;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:0 12px;
+}
+.notch-header-left{display:flex;align-items:center;gap:6px}
+.notch-header-right{display:flex;align-items:center;gap:4px}
+.gear-icon{width:11px;height:11px;color:rgba(255,255,255,0.35);cursor:pointer}
+.gear-icon:hover{color:rgba(255,255,255,0.8)}
+
+/* Session rows — matches InstanceRow */
+.mock-sessions{display:flex;flex-direction:column;gap:1px;padding:0 6px}
+.mock-session{
+  display:flex;align-items:center;gap:0;
+  padding:7px 6px 7px 5px;border-radius:10px;
+  font-size:11px;transition:background .2s;text-align:left;
+}
+.mock-session:hover{background:rgba(255,255,255,0.06)}
+
+/* Left indicator (12px wide) — spinner or dot */
+.session-indicator{
+  width:12px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  font-family:'SF Mono',SFMono-Regular,Consolas,monospace;
+  font-size:11px;font-weight:500;
+}
+.indicator-spinner{color:#D97857;animation:spinSymbol 0.9s steps(6) infinite}
+.indicator-spinner-amber{color:rgb(255,179,0);animation:spinSymbol 0.9s steps(6) infinite}
+.indicator-dot-green{width:5px;height:5px;border-radius:50%;background:rgb(102,192,115)}
+.indicator-dot-dim{width:5px;height:5px;border-radius:50%;background:rgba(255,255,255,0.2)}
+@keyframes spinSymbol{
+  0%{content:'·'}16.6%{content:'✢'}33.3%{content:'✳'}
+  50%{content:'∗'}66.6%{content:'✻'}83.3%{content:'✽'}
+}
+
+.session-info{flex:1;min-width:0;margin-left:6px}
+.session-row-top{display:flex;align-items:center;gap:5px;flex-wrap:nowrap}
+.session-title{font-weight:500;font-size:11px;color:#fff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.provider-badge{
+  font-size:7.5px;font-weight:500;padding:1.5px 5px;border-radius:999px;
+  white-space:nowrap;flex-shrink:0;
+  font-family:'SF Mono',SFMono-Regular,Consolas,monospace;
+}
+.badge-claude{color:#D97857;background:rgba(217,120,87,0.15)}
+.badge-coco{color:rgb(102,153,238);background:rgba(102,153,238,0.15)}
+.badge-codex{color:rgb(158,133,242);background:rgba(158,133,242,0.15)}
+.token-count{
+  font-size:8px;font-weight:500;color:rgba(255,255,255,0.4);
+  font-family:'SF Mono',SFMono-Regular,Consolas,monospace;
+  white-space:nowrap;flex-shrink:0;
+}
+.session-row-bottom{
+  display:flex;align-items:center;gap:3px;margin-top:2px;
+  font-size:9.5px;color:rgba(255,255,255,0.4);
+}
+.tool-name{
+  font-family:'SF Mono',SFMono-Regular,Consolas,monospace;
+  font-weight:500;white-space:nowrap;
+}
+.tool-name-amber{color:rgba(255,179,0,0.9)}
+.tool-input{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:rgba(255,255,255,0.5)}
+
+/* Right side actions */
+.session-actions{display:flex;align-items:center;gap:4px;margin-left:6px;flex-shrink:0}
+.icon-btn{
+  width:20px;height:20px;display:flex;align-items:center;justify-content:center;
+  border-radius:5px;color:rgba(255,255,255,0.4);transition:all .15s;cursor:pointer;
+  border:none;background:transparent;
+}
+.icon-btn:hover{color:rgba(255,255,255,0.8);background:rgba(255,255,255,0.1)}
+.icon-btn svg{width:10px;height:10px}
+
+/* Inline approval buttons */
+.approval-btn-inline{
+  font-size:9px;font-weight:500;padding:3px 10px;
+  border-radius:999px;border:none;cursor:pointer;transition:all .15s;
+  white-space:nowrap;
+}
+.btn-deny{background:rgba(255,255,255,0.1);color:rgba(255,255,255,0.6)}
+.btn-deny:hover{background:rgba(255,255,255,0.16);transform:scale(1.03)}
+.btn-allow{background:rgba(255,255,255,0.9);color:#000;font-weight:600}
+.btn-allow:hover{background:#fff;transform:scale(1.04)}
+
+/* ─── FEATURES ─── */
+.features{padding:100px 0}
+.features .section-label{
+  text-align:center;font-size:13px;color:var(--orange);
+  text-transform:uppercase;letter-spacing:0.12em;font-weight:600;margin-bottom:12px;
+}
+.features h2{
+  text-align:center;font-size:clamp(28px,4vw,40px);font-weight:800;
+  letter-spacing:-0.03em;margin-bottom:56px;
+}
+.feature-grid{
+  display:grid;grid-template-columns:repeat(3,1fr);gap:16px;
+}
+.feature-card{
+  padding:28px 24px;border-radius:var(--radius);
+  background:var(--surface);border:1px solid var(--border);
+  transition:all .3s;
+}
+.feature-card:hover{
+  background:var(--surface-hover);border-color:rgba(255,255,255,0.12);
+  transform:translateY(-2px);
+}
+.feature-icon{
+  width:40px;height:40px;border-radius:10px;
+  display:flex;align-items:center;justify-content:center;
+  margin-bottom:16px;font-size:18px;
+  background:rgba(255,138,76,0.1);
+}
+.feature-card h3{font-size:16px;font-weight:700;margin-bottom:8px;letter-spacing:-0.01em}
+.feature-card p{font-size:14px;color:var(--text-secondary);line-height:1.55}
+
+/* ─── FAQ ─── */
+.faq{padding:100px 0;border-top:1px solid var(--border)}
+.faq .section-label{
+  text-align:center;font-size:13px;color:var(--orange);
+  text-transform:uppercase;letter-spacing:0.12em;font-weight:600;margin-bottom:12px;
+}
+.faq h2{
+  text-align:center;font-size:clamp(28px,4vw,40px);font-weight:800;
+  letter-spacing:-0.03em;margin-bottom:56px;
+}
+.faq-list{max-width:720px;margin:0 auto}
+.faq-item{border-bottom:1px solid var(--border)}
+.faq-q{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:20px 0;cursor:pointer;font-size:16px;font-weight:600;
+  transition:color .2s;gap:16px;
+}
+.faq-q:hover{color:var(--orange)}
+.faq-q .chevron{
+  width:20px;height:20px;flex-shrink:0;transition:transform .3s;
+  color:var(--text-secondary);
+}
+.faq-item.open .chevron{transform:rotate(180deg)}
+.faq-a{
+  max-height:0;overflow:hidden;transition:max-height .35s ease;
+}
+.faq-a-inner{padding:0 0 20px;font-size:14px;color:var(--text-secondary);line-height:1.7}
+
+/* ─── BOTTOM CTA ─── */
+.bottom-cta{
+  padding:100px 0;text-align:center;position:relative;
+  border-top:1px solid var(--border);
+}
+.bottom-cta::before{
+  content:'';position:absolute;bottom:0;left:50%;transform:translateX(-50%);
+  width:600px;height:400px;
+  background:radial-gradient(ellipse,rgba(255,138,76,0.08),transparent 70%);
+  pointer-events:none;
+}
+.bottom-cta h2{
+  font-size:clamp(28px,4vw,44px);font-weight:800;letter-spacing:-0.03em;margin-bottom:16px;
+}
+.bottom-cta p{font-size:16px;color:var(--text-secondary);margin-bottom:36px;max-width:420px;margin-left:auto;margin-right:auto}
+.bottom-cta .hero-ctas{margin-bottom:0}
+
+/* ─── FOOTER ─── */
+footer{
+  padding:40px 0;border-top:1px solid var(--border);
+  font-size:13px;color:var(--text-secondary);
+}
+footer .container{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:16px}
+footer a{transition:color .2s}
+footer a:hover{color:var(--text)}
+.footer-links{display:flex;gap:24px}
+
+/* ─── RESPONSIVE ─── */
+@media(max-width:900px){
+  .feature-grid{grid-template-columns:repeat(2,1fr)}
+  .nav-links .desktop-only{display:none}
+}
+@media(max-width:600px){
+  .feature-grid{grid-template-columns:1fr}
+  .hero{padding:130px 0 60px}
+  .mockup-wrapper{margin-top:48px}
+  .mock-sessions{padding:0 4px}
+  .island-panel{width:92%}
+  .desktop-menubar-left span:nth-child(n+3){display:none}
+  .desktop-backdrop{min-height:300px}
+  nav .container{padding:0 16px}
+  .features,.faq,.bottom-cta{padding:72px 0}
+  footer .container{flex-direction:column;text-align:center}
+  .session-actions{gap:3px}
+  .approval-btn-inline{padding:2px 8px;font-size:8px}
+}
+
+/* ─── ANIMATION ─── */
+@keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+.animate{opacity:0;transform:translateY(20px)}
+.animate.visible{animation:fadeUp .6s ease forwards}
+.animate.d1{animation-delay:.1s}
+.animate.d2{animation-delay:.2s}
+.animate.d3{animation-delay:.3s}
+</style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav id="nav">
+  <div class="container">
+    <a href="#" class="nav-logo">
+      <div class="icon"><img src="icon.png" alt="Coding Island"></div>
+      <span>Coding Island</span>
+    </a>
+    <div class="nav-links">
+      <a href="#features" class="desktop-only">Features</a>
+      <a href="#faq" class="desktop-only">FAQ</a>
+      <a href="https://github.com/KDF5000/claude-island" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/KDF5000/claude-island/releases" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Download</a>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-badge animate visible">
+      <span class="dot"></span>
+      macOS native &middot; Open source
+    </div>
+    <h1 class="animate visible d1">Dynamic Island for your AI coding agents</h1>
+    <p class="animate visible d2">Monitor, approve, and jump back to any agent session — right from the MacBook notch. No context switching.</p>
+    <div class="hero-ctas animate visible d3">
+      <a href="https://github.com/KDF5000/claude-island/releases" target="_blank" rel="noopener" class="btn btn-primary">
+        <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16"/></svg>
+        Download for Free
+      </a>
+      <a href="https://github.com/KDF5000/claude-island" target="_blank" rel="noopener" class="btn btn-secondary">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .3a12 12 0 00-3.8 23.38c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.61-4.04-1.61a3.18 3.18 0 00-1.33-1.76c-1.09-.74.08-.73.08-.73a2.52 2.52 0 011.84 1.24 2.56 2.56 0 003.5 1 2.56 2.56 0 01.76-1.61c-2.67-.3-5.47-1.33-5.47-5.93a4.64 4.64 0 011.24-3.22 4.3 4.3 0 01.12-3.18s1-.33 3.3 1.23a11.4 11.4 0 016 0c2.28-1.56 3.29-1.23 3.29-1.23a4.3 4.3 0 01.12 3.18 4.64 4.64 0 011.23 3.22c0 4.61-2.8 5.63-5.48 5.92a2.87 2.87 0 01.82 2.23v3.29c0 .32.21.7.82.58A12 12 0 0012 .3"/></svg>
+        View on GitHub
+      </a>
+    </div>
+
+    <!-- Notch Mockup — floating Island panel over desktop -->
+    <div class="mockup-wrapper animate visible d3">
+      <div class="mockup-glow"></div>
+      <div class="desktop-backdrop">
+        <!-- Translucent macOS menu bar -->
+        <div class="desktop-menubar">
+          <div class="desktop-menubar-left">
+            <span class="app-name">&#63743;</span>
+            <span>Coding Island</span>
+            <span>File</span>
+            <span>Edit</span>
+            <span>View</span>
+          </div>
+          <div class="desktop-menubar-right">
+            <span>Wi-Fi</span>
+            <span>100%</span>
+            <span>Sun 3:42 PM</span>
+          </div>
+        </div>
+
+        <!-- The Island panel floating from top center (notch) -->
+        <div class="island-panel">
+          <div class="notch-ear notch-ear-left"></div>
+          <div class="notch-ear notch-ear-right"></div>
+          <!-- Icon + gear in the notch area itself -->
+          <div class="notch-header">
+            <div class="notch-header-left">
+              <canvas class="crab-canvas" width="66" height="52"></canvas>
+            </div>
+            <div class="notch-header-right">
+              <svg class="gear-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 15a3 3 0 100-6 3 3 0 000 6z"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+            </div>
+          </div>
+          <!-- Expanded content below the notch -->
+          <div class="island-inner">
+            <!-- Session rows -->
+            <div class="mock-sessions">
+              <!-- Row 1: Claude Code — processing -->
+              <div class="mock-session">
+                <div class="session-indicator">
+                  <span class="indicator-spinner" data-spinner>✳</span>
+                </div>
+                <div class="session-info">
+                  <div class="session-row-top">
+                    <span class="session-title">Refactoring auth module</span>
+                    <span class="provider-badge badge-claude">Claude</span>
+                    <span class="token-count">48K tokens</span>
+                  </div>
+                  <div class="session-row-bottom">
+                    <span class="tool-name">Edit</span>
+                    <span class="tool-input">auth/middleware.ts (12 lines)</span>
+                  </div>
+                </div>
+                <div class="session-actions">
+                  <button class="icon-btn" title="Chat">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Row 2: Coco — waiting for approval -->
+              <div class="mock-session">
+                <div class="session-indicator">
+                  <span class="indicator-spinner-amber" data-spinner-amber>✢</span>
+                </div>
+                <div class="session-info">
+                  <div class="session-row-top">
+                    <span class="session-title">Add rate limiting</span>
+                    <span class="provider-badge badge-coco">Coco</span>
+                    <span class="token-count">21K tokens</span>
+                  </div>
+                  <div class="session-row-bottom">
+                    <span class="tool-name tool-name-amber">Bash</span>
+                    <span class="tool-input" style="color:rgba(255,255,255,0.5)">npm run test -- --watch</span>
+                  </div>
+                </div>
+                <div class="session-actions">
+                  <button class="icon-btn" title="Chat">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                  </button>
+                  <button class="approval-btn-inline btn-deny">Deny</button>
+                  <button class="approval-btn-inline btn-allow">Allow</button>
+                </div>
+              </div>
+
+              <!-- Row 3: Codex — idle -->
+              <div class="mock-session">
+                <div class="session-indicator">
+                  <div class="indicator-dot-dim"></div>
+                </div>
+                <div class="session-info">
+                  <div class="session-row-top">
+                    <span class="session-title">Fix flaky test suite</span>
+                    <span class="provider-badge badge-codex">Codex</span>
+                    <span class="token-count">161K tokens</span>
+                  </div>
+                  <div class="session-row-bottom">
+                    <span>Idle</span>
+                  </div>
+                </div>
+                <div class="session-actions">
+                  <button class="icon-btn" title="Chat">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                  </button>
+                  <button class="icon-btn" title="Archive">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
+                  </button>
+                </div>
+              </div>
+
+              <!-- Row 4: Remote — ready -->
+              <div class="mock-session">
+                <div class="session-indicator">
+                  <div class="indicator-dot-green"></div>
+                </div>
+                <div class="session-info">
+                  <div class="session-row-top">
+                    <span class="session-title">Deploy pipeline fix</span>
+                    <span class="provider-badge badge-claude">Claude</span>
+                    <span class="provider-badge" style="color:rgb(102,153,238);background:rgba(102,153,238,0.15)">dev-server</span>
+                    <span class="token-count">9K tokens</span>
+                  </div>
+                  <div class="session-row-bottom">
+                    <span>Ready</span>
+                  </div>
+                </div>
+                <div class="session-actions">
+                  <button class="icon-btn" title="Chat">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                  </button>
+                  <button class="icon-btn" title="Archive">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="features" id="features">
+  <div class="container">
+    <div class="section-label">Features</div>
+    <h2>Everything you need, nothing you don't</h2>
+    <div class="feature-grid">
+      <div class="feature-card animate">
+        <div class="feature-icon">&#9889;</div>
+        <h3>Zero Config</h3>
+        <p>Launch the app and it auto-installs hooks for every supported agent. No setup scripts, no config files.</p>
+      </div>
+      <div class="feature-card animate">
+        <div class="feature-icon">&#129302;</div>
+        <h3>Multi-Agent</h3>
+        <p>Claude Code, Coco, Trae, and Codex — all in one unified interface through a shared provider architecture.</p>
+      </div>
+      <div class="feature-card animate">
+        <div class="feature-icon">&#127760;</div>
+        <h3>Remote Sessions</h3>
+        <p>Monitor agents running on remote servers over SSH reverse tunnels with full hook integration.</p>
+      </div>
+      <div class="feature-card animate">
+        <div class="feature-icon">&#128274;</div>
+        <h3>Permission Approvals</h3>
+        <p>Approve or deny tool executions directly from the session row. See the tool name and input at a glance.</p>
+      </div>
+      <div class="feature-card animate">
+        <div class="feature-icon">&#128172;</div>
+        <h3>Chat History</h3>
+        <p>Browse conversations with markdown rendering, code diffs, tool results, and rich message parsing.</p>
+      </div>
+      <div class="feature-card animate">
+        <div class="feature-icon">&#128202;</div>
+        <h3>Token Statistics</h3>
+        <p>Track usage and costs by agent with historical import, live updates, and visual breakdowns.</p>
+      </div>
+      <div class="feature-card animate">
+        <div class="feature-icon">&#63743;</div>
+        <h3>Pure Swift</h3>
+        <p>Native macOS app built with SwiftUI. No Electron, no web views. Under 50 MB of RAM.</p>
+      </div>
+      <div class="feature-card animate">
+        <div class="feature-icon">&#128187;</div>
+        <h3>Terminal Integration</h3>
+        <p>Works with iTerm2, Ghostty, Warp, Terminal.app, and tmux — with precise split-pane detection.</p>
+      </div>
+      <div class="feature-card animate">
+        <div class="feature-icon">&#128737;</div>
+        <h3>Fully Local</h3>
+        <p>No cloud, no accounts, no telemetry. Your data stays on your machine.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FAQ -->
+<section class="faq" id="faq">
+  <div class="container">
+    <div class="section-label">FAQ</div>
+    <h2>Common questions</h2>
+    <div class="faq-list">
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          Which terminals are supported?
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-a"><div class="faq-a-inner">iTerm2, Ghostty, Warp, Terminal.app, Alacritty, Kitty, WezTerm, Hyper, and more. Coding Island also supports tmux sessions and split panes with precise window matching.</div></div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          Which AI agents does it support?
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-a"><div class="faq-a-inner">Claude Code, Coco / Trae, and Codex out of the box through a shared provider architecture. The hook system is extensible for future agents.</div></div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          How does permission approval work?
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-a"><div class="faq-a-inner">When an agent requests to run a tool (file edit, bash command, etc.), the notch shows the tool name and what it wants to do. You can Allow or Deny right from the session row — no need to switch to the terminal.</div></div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          Is my data sent anywhere?
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-a"><div class="faq-a-inner">No. Coding Island runs fully locally. Session data, chat history, and token statistics never leave your machine. The only optional analytics are anonymous app-launch and session-start events.</div></div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          Does it work on external monitors?
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-a"><div class="faq-a-inner">Yes. You can select which screen to display on, including external monitors without a notch. The app adapts the overlay position accordingly.</div></div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          What are the system requirements?
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-a"><div class="faq-a-inner">macOS 15.6 or later. The app is a lightweight native macOS binary — no runtime dependencies, no Docker, no Node.js.</div></div>
+      </div>
+      <div class="faq-item">
+        <div class="faq-q" onclick="toggleFaq(this)">
+          How does remote session monitoring work?
+          <svg class="chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+        </div>
+        <div class="faq-a"><div class="faq-a-inner">Coding Island sets up an SSH reverse tunnel from the remote machine. Agent events are forwarded over the tunnel to your local Unix socket, letting you monitor and approve remote sessions the same way as local ones.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- BOTTOM CTA -->
+<section class="bottom-cta">
+  <div class="container">
+    <h2>Ready to stay in flow?</h2>
+    <p>Free, open source, and built for developers who work with AI every day.</p>
+    <div class="hero-ctas">
+      <a href="https://github.com/KDF5000/claude-island/releases" target="_blank" rel="noopener" class="btn btn-primary">
+        <svg width="16" height="16" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2.5"><path d="M12 4v12m0 0l-4-4m4 4l4-4M4 18h16"/></svg>
+        Download for Free
+      </a>
+      <a href="https://github.com/KDF5000/claude-island" target="_blank" rel="noopener" class="btn btn-secondary">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .3a12 12 0 00-3.8 23.38c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.61-4.04-1.61a3.18 3.18 0 00-1.33-1.76c-1.09-.74.08-.73.08-.73a2.52 2.52 0 011.84 1.24 2.56 2.56 0 003.5 1 2.56 2.56 0 01.76-1.61c-2.67-.3-5.47-1.33-5.47-5.93a4.64 4.64 0 011.24-3.22 4.3 4.3 0 01.12-3.18s1-.33 3.3 1.23a11.4 11.4 0 016 0c2.28-1.56 3.29-1.23 3.29-1.23a4.3 4.3 0 01.12 3.18 4.64 4.64 0 011.23 3.22c0 4.61-2.8 5.63-5.48 5.92a2.87 2.87 0 01.82 2.23v3.29c0 .32.21.7.82.58A12 12 0 0012 .3"/></svg>
+        View on GitHub
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="container">
+    <span>&copy; 2026 Coding Island &middot; Apache 2.0</span>
+    <div class="footer-links">
+      <a href="https://github.com/KDF5000/claude-island" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/KDF5000/claude-island/blob/main/LICENSE.md" target="_blank" rel="noopener">License</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// Nav scroll effect
+const nav = document.getElementById('nav');
+window.addEventListener('scroll', () => {
+  nav.classList.toggle('scrolled', window.scrollY > 40);
+});
+
+// FAQ accordion
+function toggleFaq(el) {
+  const item = el.parentElement;
+  const answer = item.querySelector('.faq-a');
+  const isOpen = item.classList.contains('open');
+  document.querySelectorAll('.faq-item.open').forEach(i => {
+    i.classList.remove('open');
+    i.querySelector('.faq-a').style.maxHeight = '0';
+  });
+  if (!isOpen) {
+    item.classList.add('open');
+    answer.style.maxHeight = answer.scrollHeight + 'px';
+  }
+}
+
+// Scroll animations
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(e => {
+    if (e.isIntersecting) {
+      e.target.classList.add('visible');
+      observer.unobserve(e.target);
+    }
+  });
+}, { threshold: 0.15 });
+document.querySelectorAll('.animate:not(.visible)').forEach(el => observer.observe(el));
+
+// ── Claude pixel icon (ClaudeCrabIcon — exact coordinates from SwiftUI source) ──
+(function drawCrab() {
+  const canvas = document.querySelector('.crab-canvas');
+  if (!canvas) return;
+  canvas.style.width = '14px';
+  canvas.style.height = '11px';
+  canvas.style.imageRendering = 'pixelated';
+  const ctx = canvas.getContext('2d');
+  const c = '#D97857'; // Claude orange
+
+  // Main body: (6, 0, 54, 39)
+  ctx.fillStyle = c;
+  ctx.fillRect(6, 0, 54, 39);
+
+  // Left antenna: (0, 13, 6, 13)
+  ctx.fillRect(0, 13, 6, 13);
+  // Right antenna: (60, 13, 6, 13)
+  ctx.fillRect(60, 13, 6, 13);
+
+  // Legs at y=39: x=6,18,42,54  w=6 h=13
+  ctx.fillRect(6, 39, 6, 13);
+  ctx.fillRect(18, 39, 6, 13);
+  ctx.fillRect(42, 39, 6, 13);
+  ctx.fillRect(54, 39, 6, 13);
+
+  // Eyes (black): left (12, 13, 6, 7), right (48, 13, 6, 7)
+  ctx.fillStyle = '#000';
+  ctx.fillRect(12, 13, 6, 7);
+  ctx.fillRect(48, 13, 6, 7);
+})();
+
+// ── Spinner symbol animation (matches app's ProcessingSpinner) ──
+const symbols = ['·','✢','✳','∗','✻','✽'];
+let idx = 0;
+setInterval(() => {
+  idx = (idx + 1) % symbols.length;
+  document.querySelectorAll('[data-spinner]').forEach(el => { el.textContent = symbols[idx]; });
+  document.querySelectorAll('[data-spinner-amber]').forEach(el => { el.textContent = symbols[(idx + 2) % symbols.length]; });
+}, 150);
+</script>
+</body>
+</html>
