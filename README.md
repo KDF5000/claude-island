@@ -6,6 +6,8 @@
     <br />
     <br />
     Forked from <a href="https://github.com/farouqaldori/claude-island" target="_blank" rel="noopener noreferrer">farouqaldori/claude-island</a>, then extended for multi-agent workflows.
+    <br />
+    <a href="README_CN.md">中文文档</a>
   </p>
 </div>
 

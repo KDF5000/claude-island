@@ -28,7 +28,7 @@ if [[ "$SKIP_NOTARIZATION_FLAG" == "1" || "$SKIP_NOTARIZATION_FLAG" == "true" ]]
 fi
 
 # GitHub repository (owner/repo format)
-GITHUB_REPO="farouqaldori/claude-island"
+GITHUB_REPO="KDF5000/claude-island"
 
 # Website repo for auto-updating appcast
 WEBSITE_DIR="${CODING_ISLAND_WEBSITE:-$PROJECT_DIR/../CodingIsland-website}"
