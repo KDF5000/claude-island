@@ -154,10 +154,14 @@ if command -v create-dmg &> /dev/null; then
         "$APP_PATH"
 else
     echo "Using hdiutil (install create-dmg for prettier DMG: brew install create-dmg)"
+    STAGING_DIR=$(mktemp -d)
+    cp -R "$APP_PATH" "$STAGING_DIR/"
+    ln -s /Applications "$STAGING_DIR/Applications"
     hdiutil create -volname "Coding Island" \
-        -srcfolder "$APP_PATH" \
+        -srcfolder "$STAGING_DIR" \
         -ov -format UDZO \
         "$DMG_PATH"
+    rm -rf "$STAGING_DIR"
 fi
 
 echo "DMG created: $DMG_PATH"
