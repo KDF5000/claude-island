@@ -699,6 +699,12 @@ class HookSocketServer {
             )
         }()
 
+        if event.providerId == "qoder" {
+            let receivedAt = Date().timeIntervalSince1970
+            let msg = (event.message ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let msgPrefix = String(msg.prefix(120))
+            logger.info("[Qoder] recv event=\(event.event, privacy: .public) status=\(event.status, privacy: .public) sid=\(event.sessionId.prefix(8), privacy: .public) cwd=\(event.cwd, privacy: .public) t=\(receivedAt, privacy: .public) msgLen=\(msg.count, privacy: .public) msgPrefix=\(msgPrefix, privacy: .public)")
+        }
 
         let normalizedEvent = event.event.lowercased().replacingOccurrences(of: "_", with: "")
 

@@ -122,12 +122,40 @@ actor SessionStore {
     // MARK: - Hook Event Processing
 
     private func processHookEvent(_ event: HookEvent) async {
-        let sessionId = event.sessionId
+        var sessionId = event.sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Qoder payloads may omit `session_id` (or send placeholders like "unknown").
+        // Avoid creating a new "unknown" session that can clobber the real session
+        // via PID/TTY dedup.
+        if event.providerId == "qoder" {
+            if sessionId.isEmpty || sessionId == "unknown" {
+                let normalizedCwd = event.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+                let candidates = sessions.values.filter { s in
+                    guard s.providerId == "qoder" else { return false }
+                    if !normalizedCwd.isEmpty && normalizedCwd != "/" {
+                        return s.cwd == normalizedCwd
+                    }
+                    return true
+                }
+
+                if let best = candidates.max(by: { $0.lastActivity < $1.lastActivity }) {
+                    let old = sessionId
+                    sessionId = best.sessionId
+                    Self.logger.info("[Qoder] remapped missing sessionId=\(old, privacy: .public) to existing session \(sessionId.prefix(8), privacy: .public) (event=\(event.event, privacy: .public))")
+                } else {
+                    Self.logger.warning("[Qoder] dropping hook event with missing session_id (event=\(event.event, privacy: .public) cwd=\(event.cwd, privacy: .public))")
+                    return
+                }
+            }
+        }
+
         let isNewSession = sessions[sessionId] == nil
 
-        // If this is a new session from a known PID or TTY, it's likely a resume or restart
-        // Remove old sessions associated with the same PID/TTY to avoid duplicates
-        if isNewSession {
+        // If this is a new session from a known PID or TTY, it's likely a resume or restart.
+        // Remove old sessions associated with the same PID/TTY to avoid duplicates.
+        // Note: Qoder runs hooks from an IDE process context where PID/TTY are not stable
+        // per session; deduping can incorrectly delete the real session.
+        if isNewSession && event.providerId != "qoder" {
             var staleSessions: [String: SessionState] = [:]
             
             // 1. Try to deduplicate by PID
@@ -150,7 +178,7 @@ actor SessionStore {
             }
         }
 
-        var session = sessions[sessionId] ?? createSession(from: event)
+        var session = sessions[sessionId] ?? createSession(from: event, sessionId: sessionId)
 
         // Track new session in Mixpanel
         if isNewSession {
@@ -222,6 +250,33 @@ actor SessionStore {
 
         let normalizedEvent = event.event.lowercased().replacingOccurrences(of: "_", with: "")
 
+        // Qoder (and other providers without reliable transcripts) can supply the user prompt
+        // directly in the hook payload. Use it as a stable title fallback.
+        if normalizedEvent == "userpromptsubmit" {
+            if let msg = event.message?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !msg.isEmpty,
+               session.conversationInfo.summary == nil,
+               session.conversationInfo.firstUserMessage == nil {
+                let ci = session.conversationInfo
+                session.conversationInfo = ConversationInfo(
+                    summary: ci.summary,
+                    lastMessage: ci.lastMessage,
+                    lastMessageRole: ci.lastMessageRole,
+                    lastToolName: ci.lastToolName,
+                    firstUserMessage: msg,
+                    lastUserMessageDate: ci.lastUserMessageDate,
+                    usage: ci.usage
+                )
+
+                if session.providerId == "qoder" {
+                    Self.logger.info("[Qoder] set firstUserMessage from hook (len=\(msg.count, privacy: .public)) for session \(sessionId.prefix(8), privacy: .public)")
+                }
+            } else if session.providerId == "qoder" {
+                let msgLen = event.message?.trimmingCharacters(in: .whitespacesAndNewlines).count ?? 0
+                Self.logger.info("[Qoder] userPromptSubmit hook received but title not set (msgLen=\(msgLen, privacy: .public), hasSummary=\(session.conversationInfo.summary != nil, privacy: .public), hasFirst=\(session.conversationInfo.firstUserMessage != nil, privacy: .public)) for session \(sessionId.prefix(8), privacy: .public)")
+            }
+        }
+
         processToolTracking(event: event, session: &session)
         processSubagentTracking(event: event, session: &session)
 
@@ -243,7 +298,7 @@ actor SessionStore {
 
     }
 
-    private func createSession(from event: HookEvent) -> SessionState {
+    private func createSession(from event: HookEvent, sessionId: String) -> SessionState {
         // Find actual project name from file cache if cwd is missing/default
         var actualCwd = event.cwd
         var projectName = URL(fileURLWithPath: event.cwd).lastPathComponent
@@ -265,7 +320,7 @@ actor SessionStore {
         }
         
         return SessionState(
-            sessionId: event.sessionId,
+            sessionId: sessionId,
             cwd: actualCwd,
             projectName: projectName,
             providerId: event.providerId,
@@ -657,7 +712,26 @@ actor SessionStore {
             sessionId: payload.sessionId,
             cwd: session.cwd
         )
-        session.conversationInfo = conversationInfo
+
+        // Merge, so transient parse misses (or providers without transcripts) don't wipe
+        // useful derived fields like title fallback from hook payloads.
+        let existing = session.conversationInfo
+        let mergedUsage = (conversationInfo.usage.totalTokens > 0) ? conversationInfo.usage : existing.usage
+        session.conversationInfo = ConversationInfo(
+            summary: conversationInfo.summary ?? existing.summary,
+            lastMessage: conversationInfo.lastMessage ?? existing.lastMessage,
+            lastMessageRole: conversationInfo.lastMessageRole ?? existing.lastMessageRole,
+            lastToolName: conversationInfo.lastToolName ?? existing.lastToolName,
+            firstUserMessage: conversationInfo.firstUserMessage ?? existing.firstUserMessage,
+            lastUserMessageDate: conversationInfo.lastUserMessageDate ?? existing.lastUserMessageDate,
+            usage: mergedUsage
+        )
+
+        if session.providerId == "qoder" {
+            let s = session.conversationInfo.summary
+            let f = session.conversationInfo.firstUserMessage
+            Self.logger.debug("[Qoder] conversationInfo merged summary=\(s != nil, privacy: .public) firstUserMessage=\(f != nil, privacy: .public) usageTotal=\(session.conversationInfo.usage.totalTokens, privacy: .public)")
+        }
 
         // Handle /clear reconciliation - remove items that no longer exist in parser state
         if session.needsClearReconciliation {
@@ -1249,7 +1323,25 @@ actor SessionStore {
         Self.logger.info("[History] processHistoryLoaded: session \(sessionId.prefix(8), privacy: .public) messages=\(messages.count) existingChatItems=\(session.chatItems.count)")
 
         // Update conversationInfo (summary, lastMessage, etc.)
-        session.conversationInfo = conversationInfo
+        // Merge, so providers without transcripts (e.g. Qoder) don't lose
+        // title fallbacks that were derived from hook payloads.
+        let existing = session.conversationInfo
+        let mergedUsage = (conversationInfo.usage.totalTokens > 0) ? conversationInfo.usage : existing.usage
+        session.conversationInfo = ConversationInfo(
+            summary: conversationInfo.summary ?? existing.summary,
+            lastMessage: conversationInfo.lastMessage ?? existing.lastMessage,
+            lastMessageRole: conversationInfo.lastMessageRole ?? existing.lastMessageRole,
+            lastToolName: conversationInfo.lastToolName ?? existing.lastToolName,
+            firstUserMessage: conversationInfo.firstUserMessage ?? existing.firstUserMessage,
+            lastUserMessageDate: conversationInfo.lastUserMessageDate ?? existing.lastUserMessageDate,
+            usage: mergedUsage
+        )
+
+        if session.providerId == "qoder" {
+            let s = session.conversationInfo.summary
+            let f = session.conversationInfo.firstUserMessage
+            Self.logger.debug("[Qoder] historyLoaded conversationInfo merged summary=\(s != nil, privacy: .public) firstUserMessage=\(f != nil, privacy: .public) usageTotal=\(session.conversationInfo.usage.totalTokens, privacy: .public)")
+        }
 
         // Convert messages to chat items
         let existingIds = Set(session.chatItems.map { $0.id })
