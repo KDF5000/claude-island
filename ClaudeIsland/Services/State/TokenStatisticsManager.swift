@@ -19,6 +19,25 @@ struct GlobalTokenStats: Codable, Equatable, Sendable {
 final class TokenStatisticsManager: ObservableObject {
     static let shared = TokenStatisticsManager()
 
+    struct HistoricalDiscoveryPaths: Sendable {
+        let remoteCacheDir: URL
+        let claudeProjectsDir: URL
+        let cocoSessionsDir: URL
+        let codexSessionsDir: URL
+        let codeBuddyDataDir: URL
+
+        static let live = HistoricalDiscoveryPaths(
+            remoteCacheDir: IslandPaths.remoteCacheDir,
+            claudeProjectsDir: ClaudePaths.projectsDir,
+            cocoSessionsDir: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Caches/coco/sessions"),
+            codexSessionsDir: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".codex/sessions"),
+            codeBuddyDataDir: FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support/CodeBuddyExtension/Data")
+        )
+    }
+
     private struct HistoricalSessionCandidate: Sendable {
         let sessionId: String
         let filePath: String
@@ -26,7 +45,7 @@ final class TokenStatisticsManager: ObservableObject {
         let priority: Int
     }
 
-    private struct HistoricalSnapshot: Sendable {
+    struct HistoricalSnapshot: Sendable {
         let globalStats: GlobalTokenStats
         let lastSeenSessionTokens: [String: Int]
     }
@@ -167,8 +186,8 @@ final class TokenStatisticsManager: ObservableObject {
         shouldAccumulateFirstSeenSessions = true
     }
 
-    nonisolated private static func buildHistoricalSnapshot() async -> HistoricalSnapshot {
-        let candidates = discoverHistoricalSessionCandidates()
+    nonisolated static func buildHistoricalSnapshot(paths: HistoricalDiscoveryPaths = .live) async -> HistoricalSnapshot {
+        let candidates = discoverHistoricalSessionCandidates(paths: paths)
 
         var globalStats = GlobalTokenStats()
         var lastSeenSessionTokens: [String: Int] = [:]
@@ -193,7 +212,7 @@ final class TokenStatisticsManager: ObservableObject {
         )
     }
 
-    nonisolated private static func discoverHistoricalSessionCandidates() -> [String: HistoricalSessionCandidate] {
+    nonisolated private static func discoverHistoricalSessionCandidates(paths: HistoricalDiscoveryPaths = .live) -> [String: HistoricalSessionCandidate] {
         let fileManager = FileManager.default
         var candidates: [String: HistoricalSessionCandidate] = [:]
 
@@ -215,7 +234,7 @@ final class TokenStatisticsManager: ObservableObject {
         }
 
         if let enumerator = fileManager.enumerator(
-            at: IslandPaths.remoteCacheDir,
+            at: paths.remoteCacheDir,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         ) {
@@ -231,7 +250,7 @@ final class TokenStatisticsManager: ObservableObject {
         }
 
         if let enumerator = fileManager.enumerator(
-            at: ClaudePaths.projectsDir,
+            at: paths.claudeProjectsDir,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         ) {
@@ -249,11 +268,8 @@ final class TokenStatisticsManager: ObservableObject {
             }
         }
 
-        let cocoSessionsDir = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Caches/coco/sessions")
-
         if let sessionDirectories = try? fileManager.contentsOfDirectory(
-            at: cocoSessionsDir,
+            at: paths.cocoSessionsDir,
             includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
         ) {
@@ -271,11 +287,8 @@ final class TokenStatisticsManager: ObservableObject {
         }
 
         // Codex sessions (~/.codex/sessions/**/rollout-*.jsonl)
-        let codexSessionsDir = fileManager.homeDirectoryForCurrentUser
-            .appendingPathComponent(".codex/sessions")
-
         if let enumerator = fileManager.enumerator(
-            at: codexSessionsDir,
+            at: paths.codexSessionsDir,
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         ) {
@@ -286,6 +299,25 @@ final class TokenStatisticsManager: ObservableObject {
                     sessionId: sessionId,
                     filePath: fileURL.path,
                     agentId: "Codex",
+                    priority: 1
+                )
+            }
+        }
+
+        if let enumerator = fileManager.enumerator(
+            at: paths.codeBuddyDataDir,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let fileURL as URL in enumerator {
+                guard fileURL.lastPathComponent == "index.json" else { continue }
+                guard fileURL.path.contains("/history/") else { continue }
+
+                let sessionId = fileURL.deletingLastPathComponent().lastPathComponent
+                register(
+                    sessionId: sessionId,
+                    filePath: fileURL.path,
+                    agentId: "CodeBuddy",
                     priority: 1
                 )
             }

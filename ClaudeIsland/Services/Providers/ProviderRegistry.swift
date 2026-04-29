@@ -43,6 +43,7 @@ class ProviderRegistry: ObservableObject {
         register(ClaudeProviderFactory.self)
         register(CocoProviderFactory.self)
         register(CodexProviderFactory.self)
+        register(CodeBuddyProviderFactory.self)
         register(QoderProviderFactory.self)
     }
 

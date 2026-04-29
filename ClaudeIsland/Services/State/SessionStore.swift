@@ -240,6 +240,11 @@ actor SessionStore {
             return
         }
 
+        if let transcriptPath = event.transcriptPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !transcriptPath.isEmpty {
+            ConversationParser.rememberExternalSessionPath(transcriptPath, for: sessionId)
+        }
+
         let newPhase = event.determinePhase()
 
         if session.phase.canTransition(to: newPhase) {
@@ -250,7 +255,7 @@ actor SessionStore {
 
         let normalizedEvent = event.event.lowercased().replacingOccurrences(of: "_", with: "")
 
-        // Qoder (and other providers without reliable transcripts) can supply the user prompt
+        // Providers without guaranteed immediate transcript parsing can supply the user prompt
         // directly in the hook payload. Use it as a stable title fallback.
         if normalizedEvent == "userpromptsubmit" {
             if let msg = event.message?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -268,19 +273,19 @@ actor SessionStore {
                     usage: ci.usage
                 )
 
-                if session.providerId == "qoder" {
-                    Self.logger.info("[Qoder] set firstUserMessage from hook (len=\(msg.count, privacy: .public)) for session \(sessionId.prefix(8), privacy: .public)")
+                if session.providerId == "qoder" || session.providerId == "codebuddy" {
+                    Self.logger.info("[\(session.providerId, privacy: .public)] set firstUserMessage from hook (len=\(msg.count, privacy: .public)) for session \(sessionId.prefix(8), privacy: .public)")
                 }
-            } else if session.providerId == "qoder" {
+            } else if session.providerId == "qoder" || session.providerId == "codebuddy" {
                 let msgLen = event.message?.trimmingCharacters(in: .whitespacesAndNewlines).count ?? 0
-                Self.logger.info("[Qoder] userPromptSubmit hook received but title not set (msgLen=\(msgLen, privacy: .public), hasSummary=\(session.conversationInfo.summary != nil, privacy: .public), hasFirst=\(session.conversationInfo.firstUserMessage != nil, privacy: .public)) for session \(sessionId.prefix(8), privacy: .public)")
+                Self.logger.info("[\(session.providerId, privacy: .public)] userPromptSubmit hook received but title not set (msgLen=\(msgLen, privacy: .public), hasSummary=\(session.conversationInfo.summary != nil, privacy: .public), hasFirst=\(session.conversationInfo.firstUserMessage != nil, privacy: .public)) for session \(sessionId.prefix(8), privacy: .public)")
             }
         }
 
         processToolTracking(event: event, session: &session)
         processSubagentTracking(event: event, session: &session)
 
-        if normalizedEvent == "permissionrequest", let toolUseId = event.toolUseId {
+        if event.expectsResponse, let toolUseId = event.toolUseId {
             Self.logger.debug("Setting tool \(toolUseId, privacy: .public) status to waitingForApproval")
             updateToolStatus(in: &session, toolId: toolUseId, status: .waitingForApproval)
         }
@@ -363,7 +368,7 @@ actor SessionStore {
                         }
                     }
 
-                    let initialStatus: ToolStatus = normalizedEvent == "permissionrequest" ? .waitingForApproval : .running
+                    let initialStatus: ToolStatus = event.expectsResponse ? .waitingForApproval : .running
 
                     let placeholderItem = ChatHistoryItem(
                         id: toolUseId,

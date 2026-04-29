@@ -150,6 +150,8 @@ struct SessionState: Equatable, Identifiable, Sendable {
             return "Codex"
         case "qoder":
             return "Qoder"
+        case "codebuddy":
+            return "CodeBuddy"
         default:
             return providerId
         }

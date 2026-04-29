@@ -47,7 +47,7 @@ actor ConversationParser {
 
     /// Bump this when parsing behavior changes in a way that should invalidate cached results.
     /// (e.g. adding support for new transcript formats like Codex token_count events)
-    private static let cacheVersion: Int = 2
+    private static let cacheVersion: Int = 3
 
     /// Logger for conversation parser (nonisolated static for cross-context access)
     nonisolated static let logger = Logger(subsystem: "com.codingisland", category: "Parser")
@@ -75,7 +75,11 @@ actor ConversationParser {
 
     /// Codex session files are not stored as `<sessionId>.jsonl` so we cache resolved paths.
     nonisolated(unsafe) private static var codexSessionPathCache: [String: String] = [:]
-    nonisolated(unsafe) private static let codexSessionPathLock = NSLock()
+    nonisolated private static let codexSessionPathLock = NSLock()
+
+    /// External providers can supply a direct transcript path in hook payloads.
+    nonisolated(unsafe) private static var externalSessionPathCache: [String: String] = [:]
+    nonisolated private static let externalSessionPathLock = NSLock()
 
     nonisolated private static func cachedCodexSessionPath(for sessionId: String) -> String? {
         codexSessionPathLock.lock()
@@ -89,9 +93,22 @@ actor ConversationParser {
         codexSessionPathLock.unlock()
     }
 
+    nonisolated static func rememberExternalSessionPath(_ path: String, for sessionId: String) {
+        externalSessionPathLock.lock()
+        externalSessionPathCache[sessionId] = path
+        externalSessionPathLock.unlock()
+    }
+
+    nonisolated private static func cachedExternalSessionPath(for sessionId: String) -> String? {
+        externalSessionPathLock.lock()
+        defer { externalSessionPathLock.unlock() }
+        return externalSessionPathCache[sessionId]
+    }
+
     /// State for incremental JSONL parsing
     private struct IncrementalParseState {
         var lastFileOffset: UInt64 = 0
+        var lastSnapshotMarker: String?
         var messages: [ChatMessage] = []
         var seenToolIds: Set<String> = []
         var seenAssistantMessageIds: Set<String> = [] // Track assistant message IDs to deduplicate
@@ -125,6 +142,15 @@ actor ConversationParser {
         }
     }
 
+    private struct CodeBuddyTranscript {
+        let info: ConversationInfo
+        let messages: [ChatMessage]
+        let completedToolIds: Set<String>
+        let toolResults: [String: ToolResult]
+        let structuredResults: [String: ToolResultData]
+        let toolIdToName: [String: String]
+    }
+
     /// Parse a JSONL file to extract conversation info
     /// Uses caching based on file modification time
     func parse(sessionId: String, cwd: String) -> ConversationInfo {
@@ -154,12 +180,19 @@ actor ConversationParser {
             return cached.info
         }
 
-        guard let data = fileManager.contents(atPath: sessionFile),
-              let content = String(data: data, encoding: .utf8) else {
+        guard let data = fileManager.contents(atPath: sessionFile) else {
             return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, firstUserMessage: nil, lastUserMessageDate: nil)
         }
 
-        let info = parseContent(content)
+        let info: ConversationInfo
+        if let codeBuddy = parseCodeBuddyTranscript(data: data, filePath: sessionFile) {
+            info = codeBuddy.info
+        } else if let content = String(data: data, encoding: .utf8) {
+            info = parseContent(content)
+        } else {
+            return ConversationInfo(summary: nil, lastMessage: nil, lastMessageRole: nil, lastToolName: nil, firstUserMessage: nil, lastUserMessageDate: nil)
+        }
+
         cache[sessionFile] = CachedInfo(version: Self.cacheVersion, modificationDate: modDate, fileSize: fileSize, info: info)
 
         return info
@@ -300,7 +333,6 @@ actor ConversationParser {
             let isMeta = json["isMeta"] as? Bool ?? false
             
             // Extract message for Claude Code and Coco format
-            var messageDict: [String: Any]?
             var contentStr: String?
             var contentArray: [[String: Any]]?
             
@@ -308,7 +340,6 @@ actor ConversationParser {
                 if !isMeta, let message = json["message"] as? [String: Any],
                    (message["extra"] as? [String: Any])?["is_original_user_input"] as? Bool != false,
                    (message["extra"] as? [String: Any])?["is_additional_context_input"] as? Bool != true {
-                    messageDict = message
                     contentStr = message["content"] as? String
                     contentArray = message["content"] as? [[String: Any]]
                 }
@@ -476,6 +507,22 @@ actor ConversationParser {
             return []
         }
 
+        if let transcript = parseCodeBuddyTranscript(atPath: sessionFile) {
+            var state = incrementalState[sessionId] ?? IncrementalParseState()
+            let marker = snapshotMarker(for: sessionFile)
+            state.lastSnapshotMarker = marker
+            state.lastFileOffset = Self.currentFileSize(atPath: sessionFile)
+            state.messages = transcript.messages
+            state.completedToolIds = transcript.completedToolIds
+            state.toolResults = transcript.toolResults
+            state.structuredResults = transcript.structuredResults
+            state.toolIdToName = transcript.toolIdToName
+            state.seenToolIds = Set(transcript.toolIdToName.keys)
+            state.seenAssistantMessageIds = Set(transcript.messages.filter { $0.role == .assistant }.map { "msg-\($0.id)" })
+            incrementalState[sessionId] = state
+            return transcript.messages
+        }
+
         var state = incrementalState[sessionId] ?? IncrementalParseState()
         _ = parseNewLines(filePath: sessionFile, state: &state)
         incrementalState[sessionId] = state
@@ -511,6 +558,55 @@ actor ConversationParser {
                 clearDetected: false,
                 sawAgentEnd: false,
                 didReadNewBytes: false
+            )
+        }
+
+        if let transcript = parseCodeBuddyTranscript(atPath: sessionFile) {
+            var state = incrementalState[sessionId] ?? IncrementalParseState()
+            let marker = snapshotMarker(for: sessionFile)
+
+            if state.lastSnapshotMarker == marker {
+                return IncrementalParseResult(
+                    newMessages: [],
+                    allMessages: state.messages,
+                    completedToolIds: state.completedToolIds,
+                    toolResults: state.toolResults,
+                    structuredResults: state.structuredResults,
+                    clearDetected: false,
+                    sawAgentEnd: false,
+                    didReadNewBytes: false
+                )
+            }
+
+            let existingIds = Set(state.messages.map(\.id))
+            let newMessages: [ChatMessage]
+            if transcript.messages.count < state.messages.count {
+                newMessages = transcript.messages
+            } else {
+                newMessages = transcript.messages.filter { !existingIds.contains($0.id) }
+            }
+
+            state.lastSnapshotMarker = marker
+            state.lastFileOffset = Self.currentFileSize(atPath: sessionFile)
+            state.clearPending = false
+            state.messages = transcript.messages
+            state.completedToolIds = transcript.completedToolIds
+            state.toolResults = transcript.toolResults
+            state.structuredResults = transcript.structuredResults
+            state.toolIdToName = transcript.toolIdToName
+            state.seenToolIds = Set(transcript.toolIdToName.keys)
+            state.seenAssistantMessageIds = Set(transcript.messages.filter { $0.role == .assistant }.map { "msg-\($0.id)" })
+            incrementalState[sessionId] = state
+
+            return IncrementalParseResult(
+                newMessages: newMessages,
+                allMessages: transcript.messages,
+                completedToolIds: transcript.completedToolIds,
+                toolResults: transcript.toolResults,
+                structuredResults: transcript.structuredResults,
+                clearDetected: false,
+                sawAgentEnd: false,
+                didReadNewBytes: true
             )
         }
 
@@ -773,6 +869,19 @@ actor ConversationParser {
         incrementalState.removeValue(forKey: sessionId)
     }
 
+    private static func currentFileSize(atPath path: String) -> UInt64 {
+        ((try? FileManager.default.attributesOfItem(atPath: path)[.size] as? NSNumber)?.uint64Value) ?? 0
+    }
+
+    private func snapshotMarker(for filePath: String) -> String? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: filePath),
+              let modDate = attrs[.modificationDate] as? Date else {
+            return nil
+        }
+        let fileSize = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+        return "\(modDate.timeIntervalSince1970)-\(fileSize)"
+    }
+
     /// Check if a /clear command was detected during the last parse
     /// Returns true once and consumes the pending flag
     func checkAndConsumeClearDetected(for sessionId: String) -> Bool {
@@ -809,7 +918,13 @@ actor ConversationParser {
             return cocoPath
         }
 
-        // 4. Local Codex sessions
+        // 4. Transcript paths provided directly by external providers (e.g. CodeBuddy)
+        if let cached = cachedExternalSessionPath(for: sessionId), FileManager.default.fileExists(atPath: cached) {
+            logger.info("[Parser] sessionFilePath: using external transcript path for \(sessionId.prefix(8), privacy: .public)")
+            return cached
+        }
+
+        // 5. Local Codex sessions
         if let cached = cachedCodexSessionPath(for: sessionId), FileManager.default.fileExists(atPath: cached) {
             logger.info("[Parser] sessionFilePath: using cached codex path for \(sessionId.prefix(8), privacy: .public)")
             return cached
@@ -837,6 +952,433 @@ actor ConversationParser {
         // Return claudePath as default if none exists
         logger.info("[Parser] sessionFilePath: returning default claude path for \(sessionId.prefix(8), privacy: .public): \(claudePath, privacy: .public)")
         return claudePath
+    }
+
+    private func parseCodeBuddyTranscript(atPath filePath: String) -> CodeBuddyTranscript? {
+        guard let data = FileManager.default.contents(atPath: filePath) else { return nil }
+        return parseCodeBuddyTranscript(data: data, filePath: filePath)
+    }
+
+    private func parseCodeBuddyTranscript(data: Data, filePath: String) -> CodeBuddyTranscript? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              json["messages"] is [[String: Any]] else {
+            return nil
+        }
+
+        let baseDir = URL(fileURLWithPath: filePath).deletingLastPathComponent()
+        let requests = json["requests"] as? [[String: Any]] ?? []
+        let entries = json["messages"] as? [[String: Any]] ?? []
+
+        var messageToRequestId: [String: String] = [:]
+        var requestStartDates: [String: Date] = [:]
+        var sessionUsage = UsageInfo()
+
+        for request in requests {
+            guard let requestId = request["id"] as? String else { continue }
+
+            if let startedAt = request["startedAt"] as? Double {
+                requestStartDates[requestId] = Date(timeIntervalSince1970: startedAt / 1000.0)
+            } else if let startedAt = request["startedAt"] as? Int {
+                requestStartDates[requestId] = Date(timeIntervalSince1970: Double(startedAt) / 1000.0)
+            }
+
+            if let usage = request["usage"] as? [String: Any] {
+                sessionUsage.inputTokens += Self.intValue(from: usage["inputTokens"])
+                sessionUsage.outputTokens += Self.intValue(from: usage["outputTokens"])
+            }
+
+            for messageId in request["messages"] as? [String] ?? [] {
+                messageToRequestId[messageId] = requestId
+            }
+        }
+
+        var parsedMessages: [ChatMessage] = []
+        var completedToolIds: Set<String> = []
+        var toolResults: [String: ToolResult] = [:]
+        var structuredResults: [String: ToolResultData] = [:]
+        var toolIdToName: [String: String] = [:]
+        var firstUserMessage: String?
+        var lastUserMessageDate: Date?
+        var fallbackUsage = UsageInfo()
+
+        for (index, entry) in entries.enumerated() {
+            guard let resolved = resolveCodeBuddyMessage(entry: entry, baseDir: baseDir, messageToRequestId: messageToRequestId) else {
+                continue
+            }
+
+            let requestId = resolved.requestId ?? messageToRequestId[resolved.id]
+            let baseDate = resolved.createdAt
+                ?? requestId.flatMap { requestStartDates[$0] }
+                ?? Date(timeIntervalSince1970: TimeInterval(index))
+            let timestamp = baseDate.addingTimeInterval(Double(index) * 0.001)
+
+            var blocks: [MessageBlock] = []
+            var visibleTextParts: [String] = []
+
+            let contentBlocks = resolved.contentBlocks ?? []
+            for contentBlock in contentBlocks {
+                guard let type = contentBlock["type"] as? String else { continue }
+                switch type {
+                case "text":
+                    let rawText = contentBlock["text"] as? String ?? contentBlock["content"] as? String ?? ""
+                    let displayText: String
+                    if resolved.role == "user" {
+                        displayText = extractCodeBuddyUserText(rawText: rawText, extra: resolved.extra) ?? rawText
+                    } else {
+                        displayText = rawText
+                    }
+                    let trimmed = displayText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty {
+                        blocks.append(.text(trimmed))
+                        visibleTextParts.append(trimmed)
+                    }
+                case "image":
+                    if let image = parseCodeBuddyImageBlock(contentBlock) {
+                        blocks.append(.image(image))
+                    }
+                default:
+                    break
+                }
+            }
+
+            for toolCall in resolved.toolCalls {
+                guard let toolId = stringValue(from: toolCall["id"]),
+                      let toolName = stringValue(from: toolCall["name"]) else {
+                    continue
+                }
+                let arguments = toolCall["arguments"] ?? toolCall["input"]
+                let input = Self.stringifyDictionary(arguments)
+                toolIdToName[toolId] = toolName
+                blocks.append(.toolUse(ToolUseBlock(id: toolId, name: toolName, input: input)))
+            }
+
+            for toolResult in resolved.toolResults {
+                let toolId = stringValue(from: toolResult["tool_call_id"]) ?? stringValue(from: toolResult["toolCallId"])
+                guard let toolId else { continue }
+                completedToolIds.insert(toolId)
+
+                let outputPayload = (toolResult["output"] as? [String: Any]) ?? toolResult
+                let content = normalizeCodeBuddyText(outputPayload["content"] ?? toolResult["content"])
+                let stdout = stringValue(from: outputPayload["stdout"])
+                let stderr = stringValue(from: outputPayload["stderr"])
+                let isError = Self.boolValue(from: outputPayload["is_error"] ?? outputPayload["isError"])
+
+                toolResults[toolId] = ToolResult(
+                    content: content,
+                    stdout: stdout,
+                    stderr: stderr,
+                    isError: isError
+                )
+
+                if let toolName = toolIdToName[toolId] {
+                    structuredResults[toolId] = Self.parseStructuredResult(
+                        toolName: toolName,
+                        toolUseResult: outputPayload,
+                        isError: isError
+                    )
+                }
+            }
+
+            if blocks.isEmpty { continue }
+
+            let role: ChatRole = resolved.role == "user" ? .user : .assistant
+            let message = ChatMessage(id: resolved.id, role: role, timestamp: timestamp, content: blocks)
+            parsedMessages.append(message)
+
+            if resolved.role == "user" {
+                let text = visibleTextParts.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+                if firstUserMessage == nil, !text.isEmpty {
+                    firstUserMessage = Self.truncateMessage(text, maxLength: 50)
+                }
+                lastUserMessageDate = timestamp
+            }
+
+            fallbackUsage.inputTokens += resolved.inputTokens
+            fallbackUsage.outputTokens += resolved.outputTokens
+        }
+
+        if sessionUsage.totalTokens == 0 {
+            sessionUsage = fallbackUsage
+        }
+
+        let info = buildConversationInfo(from: parsedMessages, firstUserMessage: firstUserMessage, lastUserMessageDate: lastUserMessageDate, usage: sessionUsage)
+
+        return CodeBuddyTranscript(
+            info: info,
+            messages: parsedMessages,
+            completedToolIds: completedToolIds,
+            toolResults: toolResults,
+            structuredResults: structuredResults,
+            toolIdToName: toolIdToName
+        )
+    }
+
+    private struct ResolvedCodeBuddyMessage {
+        let id: String
+        let role: String
+        let contentBlocks: [[String: Any]]?
+        let toolCalls: [[String: Any]]
+        let toolResults: [[String: Any]]
+        let extra: [String: Any]?
+        let requestId: String?
+        let createdAt: Date?
+        let inputTokens: Int
+        let outputTokens: Int
+    }
+
+    private func resolveCodeBuddyMessage(
+        entry: [String: Any],
+        baseDir: URL,
+        messageToRequestId: [String: String]
+    ) -> ResolvedCodeBuddyMessage? {
+        guard let id = stringValue(from: entry["id"]) else { return nil }
+
+        var merged = entry
+        if merged["message"] == nil && merged["content"] == nil {
+            let messageURL = baseDir.appendingPathComponent("messages/\(id).json")
+            if let data = try? Data(contentsOf: messageURL),
+               let fileJSON = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                for (key, value) in fileJSON where merged[key] == nil {
+                    merged[key] = value
+                }
+            }
+        }
+
+        let innerMessage = parseCodeBuddyInnerMessage(merged["message"])
+        let role = stringValue(from: merged["role"]) ?? stringValue(from: innerMessage?["role"]) ?? "assistant"
+        let contentBlocks = (merged["content"] as? [[String: Any]]) ?? (innerMessage?["content"] as? [[String: Any]])
+        let toolCalls = (merged["tool_calls"] as? [[String: Any]])
+            ?? (merged["toolCalls"] as? [[String: Any]])
+            ?? (innerMessage?["tool_calls"] as? [[String: Any]])
+            ?? []
+        let toolResults = (merged["tool_results"] as? [[String: Any]])
+            ?? (merged["toolResults"] as? [[String: Any]])
+            ?? (innerMessage?["tool_results"] as? [[String: Any]])
+            ?? []
+        let extra = parseJSONObject(from: merged["extra"])
+        let requestId = stringValue(from: merged["request_id"]) ?? stringValue(from: extra?["requestId"]) ?? messageToRequestId[id]
+        let createdAt = parseDate(from: merged["created_at"]) ?? parseDate(from: merged["timestamp"])
+        let inputTokens = Self.intValue(from: merged["input_tokens"] ?? merged["inputTokens"])
+        let outputTokens = Self.intValue(from: merged["output_tokens"] ?? merged["outputTokens"])
+
+        return ResolvedCodeBuddyMessage(
+            id: id,
+            role: role,
+            contentBlocks: contentBlocks,
+            toolCalls: toolCalls,
+            toolResults: toolResults,
+            extra: extra,
+            requestId: requestId,
+            createdAt: createdAt,
+            inputTokens: inputTokens,
+            outputTokens: outputTokens
+        )
+    }
+
+    private func buildConversationInfo(
+        from messages: [ChatMessage],
+        firstUserMessage: String?,
+        lastUserMessageDate: Date?,
+        usage: UsageInfo
+    ) -> ConversationInfo {
+        var lastMessage: String?
+        var lastMessageRole: String?
+        var lastToolName: String?
+
+        outer: for message in messages.reversed() {
+            for block in message.content.reversed() {
+                switch block {
+                case .text(let text):
+                    let cleaned = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !cleaned.isEmpty {
+                        lastMessage = cleaned
+                        lastMessageRole = message.role.rawValue
+                        break outer
+                    }
+                case .toolUse(let tool):
+                    lastMessage = tool.preview.isEmpty ? tool.name : tool.preview
+                    lastMessageRole = "tool"
+                    lastToolName = tool.name
+                    break outer
+                default:
+                    continue
+                }
+            }
+        }
+
+        return ConversationInfo(
+            summary: nil,
+            lastMessage: Self.truncateMessage(lastMessage, maxLength: 80),
+            lastMessageRole: lastMessageRole,
+            lastToolName: lastToolName,
+            firstUserMessage: firstUserMessage,
+            lastUserMessageDate: lastUserMessageDate,
+            usage: usage
+        )
+    }
+
+    private func parseCodeBuddyInnerMessage(_ raw: Any?) -> [String: Any]? {
+        if let dict = raw as? [String: Any] {
+            return dict
+        }
+        if let string = raw as? String,
+           let data = string.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return dict
+        }
+        return nil
+    }
+
+    private func parseJSONObject(from raw: Any?) -> [String: Any]? {
+        if let dict = raw as? [String: Any] {
+            return dict
+        }
+        if let string = raw as? String,
+           let data = string.data(using: .utf8),
+           let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return dict
+        }
+        return nil
+    }
+
+    private func extractCodeBuddyUserText(rawText: String, extra: [String: Any]?) -> String? {
+        if let sourceBlocks = extra?["sourceContentBlocks"] as? [[String: Any]] {
+            let text = sourceBlocks.compactMap { $0["text"] as? String }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { return text }
+        }
+
+        if let inputPhrase = extra?["inputPhrase"] as? [[String: Any]] {
+            let text = inputPhrase.compactMap { $0["expandContent"] as? String ?? $0["content"] as? String }
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty { return text }
+        }
+
+        if let extracted = extractTaggedSection(named: "user_query", from: rawText) {
+            return extracted
+        }
+
+        let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func extractTaggedSection(named tag: String, from text: String) -> String? {
+        let pattern = "<\(tag)>\\s*([\\s\\S]*?)\\s*</\(tag)>"
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: nsRange),
+              let range = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        let value = text[range].trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
+    }
+
+    private func parseCodeBuddyImageBlock(_ block: [String: Any]) -> ImageBlock? {
+        if let source = block["source"] as? [String: Any],
+           let mediaType = source["media_type"] as? String,
+           let data = source["data"] as? String {
+            return ImageBlock(mediaType: mediaType, base64Data: data)
+        }
+
+        let dataURL = stringValue(from: block["data_url"] ?? block["url"] ?? block["image_url"])
+        guard let dataURL else { return nil }
+        return imageBlock(fromDataURL: dataURL)
+    }
+
+    private func imageBlock(fromDataURL dataURL: String) -> ImageBlock? {
+        guard dataURL.hasPrefix("data:"),
+              let commaIndex = dataURL.firstIndex(of: ",") else { return nil }
+        let header = String(dataURL[dataURL.startIndex..<commaIndex])
+        let payload = String(dataURL[dataURL.index(after: commaIndex)...])
+        let mediaType = header
+            .replacingOccurrences(of: "data:", with: "")
+            .replacingOccurrences(of: ";base64", with: "")
+        guard !mediaType.isEmpty, !payload.isEmpty else { return nil }
+        return ImageBlock(mediaType: mediaType, base64Data: payload)
+    }
+
+    private static func intValue(from raw: Any?) -> Int {
+        if let int = raw as? Int { return int }
+        if let double = raw as? Double { return Int(double) }
+        if let string = raw as? String, let int = Int(string) { return int }
+        return 0
+    }
+
+    private static func boolValue(from raw: Any?) -> Bool {
+        if let bool = raw as? Bool { return bool }
+        if let int = raw as? Int { return int != 0 }
+        if let string = raw as? String {
+            return ["true", "1", "yes"].contains(string.lowercased())
+        }
+        return false
+    }
+
+    private func parseDate(from raw: Any?) -> Date? {
+        if let string = raw as? String {
+            return isoFormatter.date(from: string)
+        }
+        if let milliseconds = raw as? Double {
+            return Date(timeIntervalSince1970: milliseconds / 1000.0)
+        }
+        if let milliseconds = raw as? Int {
+            return Date(timeIntervalSince1970: Double(milliseconds) / 1000.0)
+        }
+        return nil
+    }
+
+    private func normalizeCodeBuddyText(_ raw: Any?) -> String? {
+        if let string = raw as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let blocks = raw as? [[String: Any]] {
+            let text = blocks.compactMap { block -> String? in
+                if let text = block["text"] as? String { return text }
+                if let content = block["content"] as? String { return content }
+                return nil
+            }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        }
+        return nil
+    }
+
+    private static func stringifyDictionary(_ raw: Any?) -> [String: String] {
+        guard let dict = raw as? [String: Any] else {
+            if let jsonString = raw as? String,
+               let data = jsonString.data(using: .utf8),
+               let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                return stringifyDictionary(decoded)
+            }
+            return [:]
+        }
+
+        var result: [String: String] = [:]
+        for (key, value) in dict {
+            if let string = value as? String {
+                result[key] = string
+            } else if let int = value as? Int {
+                result[key] = String(int)
+            } else if let double = value as? Double {
+                result[key] = String(double)
+            } else if let bool = value as? Bool {
+                result[key] = bool ? "true" : "false"
+            } else if JSONSerialization.isValidJSONObject(value),
+                      let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+                      let string = String(data: data, encoding: .utf8) {
+                result[key] = string
+            } else {
+                result[key] = String(describing: value)
+            }
+        }
+        return result
+    }
+
+    private func stringValue(from raw: Any?) -> String? {
+        if let string = raw as? String { return string }
+        if let int = raw as? Int { return String(int) }
+        if let double = raw as? Double { return String(double) }
+        return nil
     }
 
     /// Build subagent JSONL file path.
@@ -977,7 +1519,7 @@ actor ConversationParser {
         }
         
         guard let type = json["type"] as? String,
-              let uuid = json["uuid"] as? String else {
+              json["uuid"] != nil else {
             // Coco format fallback
             if let toolCallOuter = json["tool_call"] as? [String: Any],
                let toolCallId = toolCallOuter["tool_call_id"] as? String,

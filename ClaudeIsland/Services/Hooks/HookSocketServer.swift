@@ -182,11 +182,12 @@ struct HookEvent: Codable, Sendable {
         }
     }
 
-    /// Whether this event expects a response (permission request)
-    /// Supports both Claude Code (PermissionRequest) and Coco (permission_request) formats
+    /// Whether this event expects a response from the hook socket.
+    /// Supports Claude/Coco PermissionRequest and CodeBuddy PreToolUse approval.
     nonisolated var expectsResponse: Bool {
         let normalizedEvent = event.lowercased().replacingOccurrences(of: "_", with: "")
-        return normalizedEvent == "permissionrequest" && status == "waiting_for_approval"
+        guard status == "waiting_for_approval" else { return false }
+        return normalizedEvent == "permissionrequest" || normalizedEvent == "pretooluse"
     }
 }
 
