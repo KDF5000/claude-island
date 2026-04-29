@@ -1,0 +1,14 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Coding Island</title>
+        <item>
+            <title>1.4.0</title>
+            <pubDate>Wed, 29 Apr 2026 11:18:05 +0800</pubDate>
+            <sparkle:version>6</sparkle:version>
+            <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/KDF5000/claude-island/releases/download/v1.4.0/CodingIsland-1.4.0.dmg" length="7541153" type="application/octet-stream" sparkle:edSignature="afd90nWi+WWUWXzM3V9VrUtl9VBlbJXY7mpA/u12eObtYb/eDB7vmF1584OP9AHnVSHulS2Y100lIYiv9xRnBw=="/>
+        </item>
+    </channel>
+</rss>

@@ -2328,7 +2328,7 @@ private struct AboutSettingsView: View {
             SettingsCard {
                 SettingsRow("Star on GitHub") {
                     Button("Open") {
-                        if let url = URL(string: "https://github.com/farouqaldori/claude-island") {
+                        if let url = URL(string: "https://github.com/KDF5000/claude-island") {
                             NSWorkspace.shared.open(url)
                         }
                     }

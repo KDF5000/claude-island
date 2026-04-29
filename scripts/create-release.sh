@@ -20,7 +20,6 @@ if [[ -t 0 && -t 1 ]]; then
 fi
 
 SKIP_NOTARIZATION_FLAG="${CODING_ISLAND_SKIP_NOTARIZATION:-}"
-DEPLOY_WEBSITE_FLAG="${CODING_ISLAND_DEPLOY_WEBSITE:-}"
 
 SKIP_NOTARIZATION=""
 if [[ "$SKIP_NOTARIZATION_FLAG" == "1" || "$SKIP_NOTARIZATION_FLAG" == "true" ]]; then
@@ -30,9 +29,10 @@ fi
 # GitHub repository (owner/repo format)
 GITHUB_REPO="KDF5000/claude-island"
 
-# Website repo for auto-updating appcast
-WEBSITE_DIR="${CODING_ISLAND_WEBSITE:-$PROJECT_DIR/../CodingIsland-website}"
-WEBSITE_PUBLIC="$WEBSITE_DIR/public"
+# Website directory for hosting appcast.xml
+# Default to the repo-local ./website folder so it can be deployed directly.
+WEBSITE_DIR="${CODING_ISLAND_WEBSITE:-$PROJECT_DIR/website}"
+WEBSITE_PUBLIC="${CODING_ISLAND_WEBSITE_PUBLIC:-$WEBSITE_DIR}"
 
 APP_PATH="$EXPORT_PATH/Coding Island.app"
 APP_NAME="CodingIsland"
@@ -297,63 +297,8 @@ if [ -d "$WEBSITE_PUBLIC" ] && [ -f "$RELEASE_DIR/appcast/appcast.xml" ]; then
         echo "Updated appcast.xml with GitHub download URL"
     fi
 
-    # Update src/config.ts with latest version and download URL (preserve other content)
-    CONFIG_FILE="$WEBSITE_DIR/src/config.ts"
-    if [ -n "$GITHUB_DOWNLOAD_URL" ]; then
-        if [ -f "$CONFIG_FILE" ]; then
-            # Update existing constants in-place
-            sed -i '' "s|export const LATEST_VERSION = .*|export const LATEST_VERSION = \"$VERSION\";|" "$CONFIG_FILE"
-            sed -i '' "s|export const DOWNLOAD_URL = .*|export const DOWNLOAD_URL = \"$GITHUB_DOWNLOAD_URL\";|" "$CONFIG_FILE"
-        else
-            # Create new config file
-            cat > "$CONFIG_FILE" << EOF
-// Auto-updated by create-release.sh
-export const LATEST_VERSION = "$VERSION";
-export const DOWNLOAD_URL = "$GITHUB_DOWNLOAD_URL";
-EOF
-        fi
-        echo "Updated src/config.ts with version $VERSION"
-    fi
-
-    # Deploy via Cloudflare Pages (manual wrangler deploy — the old GitHub
-    # repo is disabled, so git push is no longer an option).
-    cd "$WEBSITE_DIR" || exit 1
-
-    WRANGLER_PROJECT="${CODING_ISLAND_WRANGLER_PROJECT:-codingisland-website}"
-
-    SHOULD_DEPLOY=0
-    if [[ "$DEPLOY_WEBSITE_FLAG" == "1" || "$DEPLOY_WEBSITE_FLAG" == "true" ]]; then
-        SHOULD_DEPLOY=1
-    elif [[ "$DEPLOY_WEBSITE_FLAG" == "0" || "$DEPLOY_WEBSITE_FLAG" == "false" ]]; then
-        SHOULD_DEPLOY=0
-    elif [[ "$IS_INTERACTIVE" == "1" ]]; then
-        read -p "Deploy website to Cloudflare Pages ($WRANGLER_PROJECT)? (Y/n) " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-            SHOULD_DEPLOY=1
-        fi
-    else
-        SHOULD_DEPLOY=0
-    fi
-
-    if [[ "$SHOULD_DEPLOY" == "1" ]]; then
-        if ! command -v wrangler >/dev/null 2>&1; then
-            echo "ERROR: wrangler not found. Install with: npm install -g wrangler"
-            echo "Skipping website deploy. Appcast updated locally at $WEBSITE_PUBLIC/appcast.xml"
-        else
-            echo "Building site..."
-            npm run build
-
-            echo "Deploying to Cloudflare Pages ($WRANGLER_PROJECT)..."
-            wrangler pages deploy dist --project-name="$WRANGLER_PROJECT"
-            echo "Website deployed!"
-        fi
-    else
-        echo "Skipped Cloudflare deploy."
-        echo "To deploy manually: cd $WEBSITE_DIR && npm run build && wrangler pages deploy dist --project-name=$WRANGLER_PROJECT"
-    fi
-
-    cd "$PROJECT_DIR"
+    echo "Updated website appcast at: $WEBSITE_PUBLIC/appcast.xml"
+    echo "Deploy the ./website directory to publish the updated feed."
 else
     echo "Website directory not found or appcast not generated"
     echo "Skipping website update."

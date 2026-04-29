@@ -18,8 +18,10 @@
     <string>Copyright 2025. All rights reserved.</string>
 
     <!-- Sparkle Update Configuration (disabled pending new domain) -->
+    <key>SUFeedURL</key>
+    <string>https://island.pcursor.run/appcast.xml</string>
     <key>SUPublicEDKey</key>
-    <string>w5NwH5KRfE7LfeZ09J8lWx3UQrWTqUbfH4HHBa1OPRk=</string>
+    <string>hPE0hWNh7Gv2gtTVb36vZ1Dsk6m3T+hhqJd2v125bZM=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
 </dict>
