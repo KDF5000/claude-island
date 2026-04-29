@@ -21,6 +21,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         windowManager?.windowController
     }
 
+    private final class ProviderAutoInstallCandidate: FirstLaunchHookAutoInstallProvider {
+        let providerId: String
+        private let provider: AgentProvider
+
+        init(provider: AgentProvider) {
+            self.provider = provider
+            self.providerId = provider.providerId
+        }
+
+        var isAvailableForAutoInstall: Bool {
+            get async { await provider.isAvailable }
+        }
+
+        func installHooks() async {
+            await provider.installHooks()
+        }
+    }
+
     override init() {
         userDriver = NotchUserDriver()
         updater = SPUUpdater(
@@ -76,8 +94,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         IslandPaths.cleanupLegacyHooks()
         HookInstaller.cleanupLegacySettingsEntries()
 
-        HookInstaller.installIfNeeded()
-
         // Start Token Statistics Manager
         _ = TokenStatisticsManager.shared
 
@@ -86,6 +102,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Start all available providers (including Coco/Trae CLI)
         Task {
+            await installHooksForAvailableProvidersOnFirstLaunchIfNeeded()
             await ProviderRegistry.shared.startAll()
         }
 
@@ -148,6 +165,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func handleScreenChange() {
         _ = windowManager?.setupNotchWindow()
+    }
+
+    private func installHooksForAvailableProvidersOnFirstLaunchIfNeeded() async {
+        let factories = ProviderRegistry.shared.registeredFactories.values.sorted {
+            $0.providerInfo.id < $1.providerInfo.id
+        }
+
+        let providers = factories.map { factory in
+            ProviderAutoInstallCandidate(provider: factory.create())
+        }
+
+        _ = await FirstLaunchHookAutoInstaller.runIfNeeded(providers: providers)
     }
 
     func applicationWillTerminate(_ notification: Notification) {

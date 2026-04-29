@@ -3,12 +3,23 @@
     <channel>
         <title>Coding Island</title>
         <item>
+            <title>1.4.1</title>
+            <pubDate>Wed, 29 Apr 2026 17:45:04 +0800</pubDate>
+            <sparkle:version>7</sparkle:version>
+            <sparkle:shortVersionString>1.4.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <enclosure url="https://github.com/KDF5000/claude-island/releases/download/v1.4.1/CodingIsland-1.4.1.dmg" length="7552536" type="application/octet-stream" sparkle:edSignature="8lLn5K/rxlkyxumXonvB3mm4myET6icI8XMlpHRFkzgM+7W/KbynIizN+xeqsFVhQKuP1JmqdQtIby2vhKTWDQ=="/>
+            <sparkle:deltas>
+                <enclosure url="https://island.pcursor.run/Coding%20Island7-6.delta" sparkle:deltaFrom="6" length="654050" type="application/octet-stream" sparkle:deltaFromSparkleExecutableSize="977840" sparkle:deltaFromSparkleLocales="de,he,ar,el,ja,fa,uk" sparkle:edSignature="ziLUsP3auK6JtfyuO2lft0Cpq+v99KcTx+G8IduiPzxPwJzu5McQkipWZSS+iBpzZGdy0EXW5XydhrusqGz9Dg=="/>
+            </sparkle:deltas>
+        </item>
+        <item>
             <title>1.4.0</title>
             <pubDate>Wed, 29 Apr 2026 11:18:05 +0800</pubDate>
             <sparkle:version>6</sparkle:version>
             <sparkle:shortVersionString>1.4.0</sparkle:shortVersionString>
             <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <enclosure url="https://github.com/KDF5000/claude-island/releases/download/v1.4.0/CodingIsland-1.4.0.dmg" length="7541153" type="application/octet-stream" sparkle:edSignature="afd90nWi+WWUWXzM3V9VrUtl9VBlbJXY7mpA/u12eObtYb/eDB7vmF1584OP9AHnVSHulS2Y100lIYiv9xRnBw=="/>
+            <enclosure url="https://island.pcursor.run/CodingIsland-1.4.0.dmg" length="7541153" type="application/octet-stream" sparkle:edSignature="afd90nWi+WWUWXzM3V9VrUtl9VBlbJXY7mpA/u12eObtYb/eDB7vmF1584OP9AHnVSHulS2Y100lIYiv9xRnBw=="/>
         </item>
     </channel>
 </rss>

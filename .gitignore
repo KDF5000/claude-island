@@ -38,6 +38,7 @@ Pods/
 
 # Release artifacts
 releases/
+.worktrees/
 
 # Python
 __pycache__/
