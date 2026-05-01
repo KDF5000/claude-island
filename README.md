@@ -73,6 +73,14 @@ Claude Island uses Mixpanel to collect anonymous usage data:
 
 No personal data or conversation content is collected.
 
+## Support
+
+If this project helps your workflow, you can support it here:
+
+<a href="https://www.buymeacoffee.com/kongdefei" target="_blank" rel="noopener noreferrer">
+  <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=kongdefei&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a coffee" />
+</a>
+
 ## License
 
 Apache 2.0
