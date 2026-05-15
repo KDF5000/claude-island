@@ -897,7 +897,15 @@ actor ConversationParser {
     private static func sessionFilePath(sessionId: String, cwd: String) -> String {
         let projectDir = cwd.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ".", with: "-")
 
-        // 1. Remote session cache (Coding Island's own cache for remote sessions)
+        // 1. Remote session cache — new format: remoteCacheDir/<agentId>/<projectDir>/<sessionId>.jsonl
+        for agentSubdir in ["claude-code", "coco"] {
+            let path = IslandPaths.remoteCacheDir.path + "/" + agentSubdir + "/" + projectDir + "/" + sessionId + ".jsonl"
+            if FileManager.default.fileExists(atPath: path) {
+                logger.info("[Parser] sessionFilePath: using island cache (\(agentSubdir)) for \(sessionId.prefix(8), privacy: .public)")
+                return path
+            }
+        }
+        // Legacy flat format: remoteCacheDir/<projectDir>/<sessionId>.jsonl
         let islandCachePath = IslandPaths.remoteCacheDir.path + "/" + projectDir + "/" + sessionId + ".jsonl"
         if FileManager.default.fileExists(atPath: islandCachePath) {
             logger.info("[Parser] sessionFilePath: using island cache for \(sessionId.prefix(8), privacy: .public)")

@@ -166,6 +166,11 @@ final class TokenStatisticsManager: ObservableObject {
             historicalRebuildTask = nil
         }
 
+        // Migrate legacy flat remote cache files to agent-subdirectory layout before scanning.
+        await Task.detached(priority: .utility) {
+            Self.migrateRemoteCacheLegacyFiles()
+        }.value
+
         let snapshot = await Task.detached(priority: .utility) {
             await Self.buildHistoricalSnapshot()
         }.value
@@ -238,12 +243,28 @@ final class TokenStatisticsManager: ObservableObject {
             includingPropertiesForKeys: [.isRegularFileKey],
             options: [.skipsHiddenFiles]
         ) {
+            let remoteCachePath = paths.remoteCacheDir.path
             for case let fileURL as URL in enumerator {
                 guard fileURL.pathExtension == "jsonl" else { continue }
+                // Determine agentId from path structure:
+                //   New:    remoteCacheDir/<agentId>/<projectDir>/<sessionId>.jsonl
+                //   Legacy: remoteCacheDir/<projectDir>/<sessionId>.jsonl
+                let agentId: String
+                let relativePath = String(fileURL.path.dropFirst(remoteCachePath.count + 1))
+                let firstComponent = relativePath.components(separatedBy: "/").first ?? ""
+                switch firstComponent {
+                case "claude-code":
+                    agentId = "Claude Code"
+                case "coco":
+                    agentId = "Coco"
+                default:
+                    // Legacy flat layout: infer from content
+                    agentId = inferAgentId(for: fileURL.path, fallback: "Claude Code")
+                }
                 register(
                     sessionId: fileURL.deletingPathExtension().lastPathComponent,
                     filePath: fileURL.path,
-                    agentId: inferAgentId(for: fileURL.path, fallback: "Claude Code"),
+                    agentId: agentId,
                     priority: 3
                 )
             }
@@ -394,11 +415,107 @@ final class TokenStatisticsManager: ObservableObject {
             return fallback
         }
 
-        if prefix.contains("\"response_meta\"") || prefix.contains("\"user_prompt_submit\"") || prefix.contains("\"agent_start\"") {
+        if prefix.contains("\"response_meta\"") || prefix.contains("\"user_prompt_submit\"") || prefix.contains("\"agent_start\"") || prefix.contains("\"state_update\"") {
             return "Coco"
         }
 
         return fallback
+    }
+
+    /// Migrates remote cache files to the correct agent subdirectory.
+    ///
+    /// Handles two cases:
+    /// 1. Legacy flat files: remoteCacheDir/<projectDir>/<sessionId>.jsonl → move to agentId subdir
+    /// 2. Misclassified files: remoteCacheDir/claude-code/... that are actually Coco format → move to coco/
+    nonisolated static func migrateRemoteCacheLegacyFiles(paths: HistoricalDiscoveryPaths = .live) {
+        let fm = FileManager.default
+        let cacheDir = paths.remoteCacheDir
+        let knownAgentDirs: Set<String> = ["claude-code", "coco", "codex"]
+
+        guard let topDirs = try? fm.contentsOfDirectory(
+            at: cacheDir,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return }
+
+        for projectDirURL in topDirs {
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: projectDirURL.path, isDirectory: &isDir), isDir.boolValue else { continue }
+
+            let isAgentDir = knownAgentDirs.contains(projectDirURL.lastPathComponent)
+
+            if isAgentDir {
+                // Re-check files inside claude-code/ for misclassified Coco sessions
+                guard projectDirURL.lastPathComponent == "claude-code" else { continue }
+                guard let subDirs = try? fm.contentsOfDirectory(
+                    at: projectDirURL,
+                    includingPropertiesForKeys: [.isDirectoryKey],
+                    options: [.skipsHiddenFiles]
+                ) else { continue }
+                for subDirURL in subDirs {
+                    guard let files = try? fm.contentsOfDirectory(
+                        at: subDirURL,
+                        includingPropertiesForKeys: [.isRegularFileKey],
+                        options: [.skipsHiddenFiles]
+                    ) else { continue }
+                    for fileURL in files {
+                        guard fileURL.pathExtension == "jsonl" else { continue }
+                        let actual = inferAgentId(for: fileURL.path, fallback: "claude-code")
+                        guard actual == "Coco" else { continue }
+                        let destDir = cacheDir.appendingPathComponent("coco").appendingPathComponent(subDirURL.lastPathComponent)
+                        let destFile = destDir.appendingPathComponent(fileURL.lastPathComponent)
+                        guard !fm.fileExists(atPath: destFile.path) else {
+                            try? fm.removeItem(at: fileURL)
+                            continue
+                        }
+                        do {
+                            try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+                            try fm.moveItem(at: fileURL, to: destFile)
+                        } catch {}
+                    }
+                    if (try? fm.contentsOfDirectory(atPath: subDirURL.path))?.isEmpty == true {
+                        try? fm.removeItem(at: subDirURL)
+                    }
+                }
+                continue
+            }
+
+            guard let files = try? fm.contentsOfDirectory(
+                at: projectDirURL,
+                includingPropertiesForKeys: [.isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            ) else { continue }
+
+            for fileURL in files {
+                guard fileURL.pathExtension == "jsonl" else { continue }
+
+                let rawAgentId = inferAgentId(for: fileURL.path, fallback: "claude-code")
+                let agentSubdir = rawAgentId == "Coco" ? "coco" : "claude-code"
+
+                let destDir = cacheDir
+                    .appendingPathComponent(agentSubdir)
+                    .appendingPathComponent(projectDirURL.lastPathComponent)
+                let destFile = destDir.appendingPathComponent(fileURL.lastPathComponent)
+
+                guard !fm.fileExists(atPath: destFile.path) else {
+                    // Destination already exists — remove the legacy copy
+                    try? fm.removeItem(at: fileURL)
+                    continue
+                }
+
+                do {
+                    try fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+                    try fm.moveItem(at: fileURL, to: destFile)
+                } catch {
+                    // Leave in place on failure; legacy fallback in scanner still handles it
+                }
+            }
+
+            // Remove now-empty project directory
+            if (try? fm.contentsOfDirectory(atPath: projectDirURL.path))?.isEmpty == true {
+                try? fm.removeItem(at: projectDirURL)
+            }
+        }
     }
 
     private func handleSessionsUpdate(_ sessions: [SessionState]) {

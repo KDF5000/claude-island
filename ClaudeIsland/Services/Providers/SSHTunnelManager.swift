@@ -1688,7 +1688,9 @@ exit 11
             let projectDir = entry.cwd
                 .replacingOccurrences(of: "/", with: "-")
                 .replacingOccurrences(of: ".", with: "-")
-            let localDir = IslandPaths.remoteCacheDir.appendingPathComponent(projectDir)
+            let localDir = IslandPaths.remoteCacheDir
+                .appendingPathComponent(entry.agentId)
+                .appendingPathComponent(projectDir)
             let localPath = localDir.appendingPathComponent("\(entry.sessionId).jsonl")
 
             // Dedup: skip if local file exists and is same size or larger
@@ -1739,7 +1741,9 @@ exit 11
                 let projectDir = entry.cwd
                     .replacingOccurrences(of: "/", with: "-")
                     .replacingOccurrences(of: ".", with: "-")
-                let localDir = IslandPaths.remoteCacheDir.appendingPathComponent(projectDir)
+                let localDir = IslandPaths.remoteCacheDir
+                    .appendingPathComponent(entry.agentId)
+                    .appendingPathComponent(projectDir)
                 let localPath = localDir.appendingPathComponent("\(entry.sessionId).jsonl")
                 do {
                     try fm.createDirectory(at: localDir, withIntermediateDirectories: true)
@@ -1896,6 +1900,7 @@ for line in sys.stdin:
         let cwd: String
         let remotePath: String
         let fileSize: Int
+        let agentId: String  // "claude-code" or "coco"
     }
 
     /// Enumerates all session JSONL files on the remote host.
@@ -1987,7 +1992,7 @@ for line in sys.stdin:
         //   Claude Code: ~/.claude/projects/<escapedCwd>/<sessionId>.jsonl
         //   Coco/Trae:   <cache>/sessions/<sessionId>/events.jsonl
         //
-        // Output format: <sessionId>\t<cwd>\t<remotePath>\t<fileSize>
+        // Output format: <sessionId>\t<cwd>\t<remotePath>\t<fileSize>\t<agentId>
         return remoteHomeBootstrapShell() + #"""
 # 1. Claude Code sessions
 claude_dir="$HOME/.claude/projects"
@@ -1997,7 +2002,7 @@ if [ -d "$claude_dir" ]; then
         sid="$(basename "$fpath" .jsonl)"
         cwd="$(basename "$(dirname "$fpath")")"
         fsize=$(stat -c%s "$fpath" 2>/dev/null || stat -f%z "$fpath" 2>/dev/null || echo "0")
-        printf "%s\t%s\t%s\t%s\n" "$sid" "$cwd" "$fpath" "$fsize"
+        printf "%s\t%s\t%s\t%s\t%s\n" "$sid" "$cwd" "$fpath" "$fsize" "claude-code"
     done
 fi
 # 2. Coco/Trae sessions: <base>/sessions/<sessionId>/events.jsonl or session.log
@@ -2021,7 +2026,7 @@ for sbase in \
         done
         [ -z "$fpath" ] && continue
         fsize=$(stat -c%s "$fpath" 2>/dev/null || stat -f%z "$fpath" 2>/dev/null || echo "0")
-        printf "%s\t%s\t%s\t%s\n" "$sid" "$sd" "$fpath" "$fsize"
+        printf "%s\t%s\t%s\t%s\t%s\n" "$sid" "$sd" "$fpath" "$fsize" "coco"
     done
 done
 """#
@@ -2037,12 +2042,14 @@ done
             let sessionId = String(parts[0]).trimmingCharacters(in: .whitespaces)
             let cwd = String(parts[1]).trimmingCharacters(in: .whitespaces)
             let remotePath = String(parts[2]).trimmingCharacters(in: .whitespaces)
+            let agentId = parts.count >= 5 ? String(parts[4]).trimmingCharacters(in: .whitespaces) : "coco"
             guard !sessionId.isEmpty else { continue }
             entries.append(RemoteSessionEntry(
                 sessionId: sessionId,
                 cwd: cwd,
                 remotePath: remotePath,
-                fileSize: fileSize
+                fileSize: fileSize,
+                agentId: agentId
             ))
         }
         return entries
